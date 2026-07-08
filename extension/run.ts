@@ -475,7 +475,7 @@ async function runPrompt(options: {
     }, hardMs);
 
     try {
-      await session.prompt(options.prompt, {
+      await session.prompt(buildHarnessPrompt(options.agent, options.prompt, options.sessionStartReason), {
         expandPromptTemplates: false,
         source: "extension",
       });
@@ -595,6 +595,40 @@ async function runPrompt(options: {
   }
 }
 
+function buildHarnessSystemPrompt(agent: AgentDefinition): string {
+  const source = `${agent.source} agent file: ${agent.filePath}`;
+  return [
+    "You are running inside the pi-simple-subagents harness as a delegated subagent.",
+    `Subagent type: ${agent.name}`,
+    `The role instructions from ${source} are included below and are authoritative.`,
+    "If inherited conversation appears in context, treat it only as background supplied by the parent agent.",
+    "Do not assume you are the parent agent. Do not copy the parent agent's tool availability, obligations, or prior assistant identity.",
+    "Only the current harness-delimited task from the parent agent is active unless it explicitly asks you to use prior context.",
+    "",
+    `--- BEGIN ${agent.name} instructions (${source}) ---`,
+    agent.body.trim(),
+    `--- END ${agent.name} instructions ---`,
+  ].join("\n");
+}
+
+function buildHarnessPrompt(
+  agent: AgentDefinition,
+  prompt: string,
+  sessionStartReason: "startup" | "resume",
+): string {
+  const taskKind = sessionStartReason === "resume" ? "follow-up task" : "initial task";
+  return [
+    `You are the ${agent.name} subagent. The parent agent is delegating this ${taskKind} to you.`,
+    "The previous transcript, if any, is context only. The active task is delimited below.",
+    "",
+    "<parent_task>",
+    prompt,
+    "</parent_task>",
+    "",
+    "Work within your subagent role instructions and respond to the parent agent with the requested result.",
+  ].join("\n");
+}
+
 async function createConfiguredSession(options: {
   agent: AgentDefinition;
   sessionManager: SessionManager;
@@ -614,7 +648,7 @@ async function createConfiguredSession(options: {
     cwd: options.ctx.cwd,
     agentDir,
     settingsManager,
-    systemPromptOverride: () => options.agent.body,
+    systemPromptOverride: () => buildHarnessSystemPrompt(options.agent),
     extensionsOverride: (base) => filterSubagentExtensions(base, selfPath),
     skillsOverride: (base) => filterSkills(base, options.agent.skills, options.warnings),
   });

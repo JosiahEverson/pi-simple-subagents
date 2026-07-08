@@ -95,6 +95,7 @@ function renderSubagentResult(
   const response = payload?.response ?? text;
   const display = options.expanded ? response : collapseMarkdown(response, COLLAPSED_RESPONSE_LINES);
   const container = new Container();
+  container.addChild(new Spacer(1));
   container.addChild(new Text(theme.fg("toolTitle", theme.bold("subagent response")), 0, 0));
   container.addChild(
     new Markdown(display || theme.fg("muted", "No response."), 0, 0, getMarkdownTheme(), {
