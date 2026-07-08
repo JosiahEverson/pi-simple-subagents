@@ -25,14 +25,22 @@ interface SubagentResponsePayload {
 function renderSubagentCall(
   verb: "spawn" | "message",
   typeOrId: string | undefined,
+  prompt: string | undefined,
   theme: Theme,
-): Text {
+): Container {
   const subject = typeOrId?.trim() || "default";
-  return new Text(
-    `${theme.fg("toolTitle", theme.bold(verb))} ${theme.fg("accent", subject)} ${theme.fg("toolTitle", "subagent")}`,
-    0,
-    0,
+  const container = new Container();
+  container.addChild(
+    new Text(
+      `${theme.fg("toolTitle", theme.bold(verb))} ${theme.fg("accent", subject)} ${theme.fg("toolTitle", "subagent")}`,
+      0,
+      0,
+    ),
   );
+  if (prompt) {
+    container.addChild(new Text(`\n${theme.fg("dim", prompt)}`, 0, 0));
+  }
+  return container;
 }
 
 function renderSubagentResult(
@@ -139,7 +147,7 @@ export default function simpleSubagents(pi: ExtensionAPI) {
         ctx,
         SELF_EXTENSION_PATH,
       ),
-    renderCall: (args, theme) => renderSubagentCall("spawn", args.subagent_type, theme),
+    renderCall: (args, theme) => renderSubagentCall("spawn", args.subagent_type, args.prompt, theme),
     renderResult: (result, options, theme) => renderSubagentResult(result, options, theme),
   });
 
@@ -165,7 +173,7 @@ export default function simpleSubagents(pi: ExtensionAPI) {
         ctx,
         SELF_EXTENSION_PATH,
       ),
-    renderCall: (args, theme) => renderSubagentCall("message", args.subagent_id, theme),
+    renderCall: (args, theme) => renderSubagentCall("message", args.subagent_id, args.prompt, theme),
     renderResult: (result, options, theme) => renderSubagentResult(result, options, theme),
   });
 }
