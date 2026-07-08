@@ -1,0 +1,80 @@
+# pi-simple-subagents
+
+Lightweight synchronous subagents for Pi.
+
+This package adds three tools:
+
+- `list_subagents` shows available subagent types.
+- `spawn_subagent` starts a persistent Pi session for a subagent and waits for its response.
+- `message_subagent` sends a follow-up prompt to a previously spawned subagent.
+
+## Install
+
+```bash
+pi install git:github.com/JosiahEverson/pi-simple-subagents
+```
+
+For local development:
+
+```bash
+pi install /path/to/pi-simple-subagents
+```
+
+After installing or editing the package, run `/reload` in Pi.
+
+## Agent Definitions
+
+Built-in agents live in this package's `agents/` directory. User agents can be
+added in `~/.pi/agent/agents/*.md`. A user agent with the same `name` as a
+built-in overrides it.
+
+Project-local `.pi/agents` files are deliberately ignored.
+
+Example:
+
+```markdown
+---
+name: worker
+description: Implementation subagent for narrow, coherent edits.
+model: openai-codex/gpt-5.5
+thinking: medium
+tools: [read, bash, edit, write]
+skills: []
+context: fork
+---
+System prompt body...
+```
+
+`tools` and `skills` accept a YAML list, a comma-separated string, or `all`.
+Omitting `tools` or `skills` means `all`.
+
+## Settings
+
+All settings are optional under `simpleSubagents` in `~/.pi/agent/settings.json`:
+
+```jsonc
+{
+  "simpleSubagents": {
+    "defaultModel": "provider/model",
+    "defaultSubagentTypeId": "worker",
+    "defaultThinking": "medium",
+    "builtinSubagentOverrides": {
+      "worker": { "model": "provider/model", "thinking": "medium" }
+    },
+    "summarizeOnTimeout": false,
+    "timeoutSummaryModel": "provider/model",
+    "softTimeoutMinutes": 30,
+    "hardTimeoutMinutes": 45,
+    "maxConcurrentSubagents": 4
+  }
+}
+```
+
+## Notes
+
+Subagent sessions are real Pi sessions and remain resumable. They use a
+synthetic cwd below the current project so they do not clutter the default
+project session list, but they are visible in the all-sessions view.
+
+The `researcher` built-in expects web tools from the `pi-web-access` extension,
+including `web_search`, `fetch_content`, `get_search_content`, and `fetch`.

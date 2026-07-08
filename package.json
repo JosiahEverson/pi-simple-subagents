@@ -1,0 +1,51 @@
+{
+  "name": "pi-simple-subagents",
+  "version": "0.1.0",
+  "description": "Lightweight synchronous subagents for Pi.",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "0BSD",
+  "pi": {
+    "extensions": [
+      "./extension/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "npm run typecheck"
+  },
+  "files": [
+    "agents/",
+    "extension/",
+    "README.md",
+    "LICENSE",
+    "package.json"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.80.3",
+    "@earendil-works/pi-coding-agent": "^0.80.3",
+    "@types/node": "^24.12.4",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}
