@@ -56,6 +56,7 @@ function renderSubagentCall(
   if (prompt) {
     const blockquote = prompt.split("\n").map((line) => `> ${line}`).join("\n");
     container.addChild(new Spacer(1));
+    container.addChild(new Text(theme.fg("customMessageLabel", theme.bold("prompt to subagent")), 0, 0));
     container.addChild(
       new Markdown(blockquote, 0, 0, getMarkdownTheme(), {
         color: (value: string) => theme.fg("dim", value),
@@ -94,6 +95,7 @@ function renderSubagentResult(
   const response = payload?.response ?? text;
   const display = options.expanded ? response : collapseMarkdown(response, COLLAPSED_RESPONSE_LINES);
   const container = new Container();
+  container.addChild(new Text(theme.fg("toolTitle", theme.bold("subagent response")), 0, 0));
   container.addChild(
     new Markdown(display || theme.fg("muted", "No response."), 0, 0, getMarkdownTheme(), {
       color: (value: string) => theme.fg("toolOutput", value),
