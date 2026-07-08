@@ -416,6 +416,7 @@ async function runPrompt(options: {
         elapsedMs: Date.now() - start,
         model: config.modelLabel,
         thinking: config.thinking,
+        usage: activeSession ? summarizeUsage(activeSession.messages) : undefined,
         warnings,
       },
     });

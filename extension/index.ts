@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { Markdown, Text, Container } from "@earendil-works/pi-tui";
+import { Markdown, Text, Container, Spacer } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { getMarkdownTheme, keyHint, type AgentToolResult, type ExtensionAPI, type Theme, type ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
 import { SubagentRegistry } from "./registry.ts";
@@ -7,6 +7,7 @@ import {
   executeListSubagents,
   executeMessageSubagent,
   executeSpawnSubagent,
+  type SubagentToolDetails,
 } from "./run.ts";
 import { installStaleCtxGuard } from "./stale-ctx-guard.ts";
 
@@ -20,6 +21,21 @@ interface SubagentResponsePayload {
     code?: string;
     message?: string;
   };
+}
+
+function formatTokenCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return `${n}`;
+}
+
+function formatUsageLine(details: SubagentToolDetails | undefined, theme: Theme): string {
+  const usage = details?.usage;
+  if (!usage || usage.totalTokens === 0) return "";
+  return theme.fg(
+    "dim",
+    `↑${formatTokenCount(usage.input)} ↓${formatTokenCount(usage.output)} $${usage.cost.total.toFixed(3)}`,
+  );
 }
 
 function renderSubagentCall(
@@ -38,7 +54,13 @@ function renderSubagentCall(
     ),
   );
   if (prompt) {
-    container.addChild(new Text(`\n${theme.fg("dim", prompt)}`, 0, 0));
+    const blockquote = prompt.split("\n").map((line) => `> ${line}`).join("\n");
+    container.addChild(new Spacer(1));
+    container.addChild(
+      new Markdown(blockquote, 0, 0, getMarkdownTheme(), {
+        color: (value: string) => theme.fg("dim", value),
+      }),
+    );
   }
   return container;
 }
@@ -52,9 +74,12 @@ function renderSubagentResult(
     .filter((part): part is { type: "text"; text: string } => part.type === "text")
     .map((part) => part.text)
     .join("\n");
+  const details = result.details as SubagentToolDetails | undefined;
 
   if (options.isPartial) {
-    return new Text(theme.fg("muted", text || "Working..."), 0, 0);
+    const usagePart = formatUsageLine(details, theme);
+    const progress = theme.fg("muted", text || "Working...");
+    return new Text(usagePart ? `${progress}\n${usagePart}` : progress, 0, 0);
   }
 
   const payload = parseSubagentPayload(text);
@@ -80,7 +105,9 @@ function renderSubagentResult(
       ? `\n... (${keyHint("app.tools.expand", "to expand")})`
       : `\n(${keyHint("app.tools.expand", "to expand")})`
     : `\n(${keyHint("app.tools.expand", "to collapse")})`;
-  container.addChild(new Text(theme.fg("muted", hint), 0, 0));
+  const usagePart = formatUsageLine(details, theme);
+  const footer = usagePart ? `${hint}  ${usagePart}` : hint;
+  container.addChild(new Text(theme.fg("muted", footer), 0, 0));
 
   return container;
 }
