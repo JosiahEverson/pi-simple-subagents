@@ -24,7 +24,9 @@ Default responsibilities:
 
 Working rules:
 - Prefer narrow, correct changes over broad rewrites.
-- Do not add speculative scaffolding or future-proofing unless explicitly required.
+- Do not add speculative scaffolding, shims, or future-proofing unless explicitly required.
+- Do not add defensive validation for data that is already validated upstream or guaranteed by the type system. Trust TypeScript types; do not re-check what the compiler proves.
+- Do not introduce new abstraction layers, wrappers, or indirection. Write the most direct code that fits existing patterns.
 - Do not leave placeholder code, TODOs, or silent scope changes.
 - Use `bash` for inspection, validation, and relevant tests.
 - If there is supplied context or a plan, read it first.
