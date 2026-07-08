@@ -43,6 +43,12 @@ const TOOL_NAMES = {
 } as const;
 
 const SELF_TOOL_NAMES = new Set<string>(Object.values(TOOL_NAMES));
+const SUBAGENT_EXTENSION_EXCLUDE_PATH_PARTS = [
+  // This session-management extension schedules idle polling with a
+  // session-bound ctx; subagent sessions are transient in-process sessions, so
+  // disposing them can otherwise trip pi's stale-context guard.
+  "/pi-session-naming/",
+] as const;
 const DEFAULT_SOFT_TIMEOUT_MINUTES = 30;
 const DEFAULT_HARD_TIMEOUT_MINUTES = 45;
 const DEFAULT_MAX_CONCURRENT_SUBAGENTS = 4;
@@ -559,14 +565,14 @@ async function createConfiguredSession(options: {
   const settingsManager = SettingsManager.create(options.ctx.cwd, agentDir, {
     projectTrusted: false,
   });
-  const selfPath = resolve(options.selfExtensionPath);
+  const selfPath = normalizeExtensionPath(options.selfExtensionPath);
 
   const resourceLoader = new DefaultResourceLoader({
     cwd: options.ctx.cwd,
     agentDir,
     settingsManager,
     systemPromptOverride: () => options.agent.body,
-    extensionsOverride: (base) => filterSelfExtension(base, selfPath),
+    extensionsOverride: (base) => filterSubagentExtensions(base, selfPath),
     skillsOverride: (base) => filterSkills(base, options.agent.skills, options.warnings),
   });
   await resourceLoader.reload();
@@ -601,13 +607,24 @@ async function createConfiguredSession(options: {
   return created;
 }
 
-function filterSelfExtension(base: LoadExtensionsResult, selfPath: string): LoadExtensionsResult {
+function filterSubagentExtensions(
+  base: LoadExtensionsResult,
+  selfPath: string,
+): LoadExtensionsResult {
   return {
     ...base,
-    extensions: base.extensions.filter(
-      (extension) => resolve(extension.resolvedPath) !== selfPath,
-    ),
+    extensions: base.extensions.filter((extension) => {
+      const extensionPath = normalizeExtensionPath(extension.resolvedPath);
+      return (
+        extensionPath !== selfPath &&
+        !SUBAGENT_EXTENSION_EXCLUDE_PATH_PARTS.some((part) => extensionPath.includes(part))
+      );
+    }),
   };
+}
+
+function normalizeExtensionPath(path: string): string {
+  return resolve(path).replaceAll("\\", "/");
 }
 
 function filterSkills(
