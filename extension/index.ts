@@ -1,7 +1,8 @@
 import { fileURLToPath } from "node:url";
 import { Markdown, Text, Container, Spacer } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { getMarkdownTheme, keyHint, type AgentToolResult, type ExtensionAPI, type Theme, type ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, getMarkdownTheme, keyHint, type AgentToolResult, type ExtensionAPI, type Theme, type ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
+import { discoverAgents, type AgentContextMode } from "./agents.ts";
 import { SubagentRegistry } from "./registry.ts";
 import {
   executeListSubagents,
@@ -9,6 +10,7 @@ import {
   executeSpawnSubagent,
   type SubagentToolDetails,
 } from "./run.ts";
+import { loadSettings } from "./settings.ts";
 import { installStaleCtxGuard } from "./stale-ctx-guard.ts";
 
 const SELF_EXTENSION_PATH = fileURLToPath(import.meta.url);
@@ -42,13 +44,15 @@ function renderSubagentCall(
   verb: "spawn" | "message",
   typeOrId: string | undefined,
   prompt: string | undefined,
+  contextMode: AgentContextMode | undefined,
   theme: Theme,
 ): Container {
   const subject = typeOrId?.trim() || "default";
+  const contextLabel = contextMode ? ` ${theme.fg("dim", `context: ${contextMode === "fork" ? "forked" : "fresh"}`)}` : "";
   const container = new Container();
   container.addChild(
     new Text(
-      `${theme.fg("toolTitle", theme.bold(verb))} ${theme.fg("accent", subject)} ${theme.fg("toolTitle", "subagent")}`,
+      `${theme.fg("toolTitle", theme.bold(verb))} ${theme.fg("accent", subject)} ${theme.fg("toolTitle", "subagent")}${contextLabel}`,
       0,
       0,
     ),
@@ -131,6 +135,11 @@ function collapseMarkdown(markdown: string, maxLines: number): string {
   return lines.slice(0, maxLines).join("\n");
 }
 
+function getAgentContext(type: string | undefined): AgentContextMode | undefined {
+  if (!type) return undefined;
+  return discoverAgents(getAgentDir()).agents.find((agent) => agent.name === type)?.context;
+}
+
 export default function simpleSubagents(pi: ExtensionAPI) {
   // Protect the whole process from ANY extension (local or 3rd party) that
   // touches a stale ctx from a timer/detached promise after session
@@ -177,7 +186,10 @@ export default function simpleSubagents(pi: ExtensionAPI) {
         ctx,
         SELF_EXTENSION_PATH,
       ),
-    renderCall: (args, theme) => renderSubagentCall("spawn", args.subagent_type, args.prompt, theme),
+    renderCall: (args, theme) => {
+      const type = args.subagent_type ?? loadSettings().defaultSubagentTypeId;
+      return renderSubagentCall("spawn", type, args.prompt, getAgentContext(type), theme);
+    },
     renderResult: (result, options, theme) => renderSubagentResult(result, options, theme),
   });
 
@@ -203,7 +215,7 @@ export default function simpleSubagents(pi: ExtensionAPI) {
         ctx,
         SELF_EXTENSION_PATH,
       ),
-    renderCall: (args, theme) => renderSubagentCall("message", args.subagent_id, args.prompt, theme),
+    renderCall: (args, theme) => renderSubagentCall("message", args.subagent_id, args.prompt, getAgentContext(registry.get(args.subagent_id)?.type), theme),
     renderResult: (result, options, theme) => renderSubagentResult(result, options, theme),
   });
 }

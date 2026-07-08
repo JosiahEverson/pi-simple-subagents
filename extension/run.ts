@@ -598,16 +598,10 @@ async function runPrompt(options: {
 function buildHarnessSystemPrompt(agent: AgentDefinition): string {
   const source = `${agent.source} agent file: ${agent.filePath}`;
   return [
-    "You are running inside the pi-simple-subagents harness as a delegated subagent.",
-    `Subagent type: ${agent.name}`,
-    `The role instructions from ${source} are included below and are authoritative.`,
-    "If inherited conversation appears in context, treat it only as background supplied by the parent agent.",
-    "Do not assume you are the parent agent. Do not copy the parent agent's tool availability, obligations, or prior assistant identity.",
-    "Only the current harness-delimited task from the parent agent is active unless it explicitly asks you to use prior context.",
+    `You are the ${agent.name} subagent.`,
+    `Your role instructions from ${source} are authoritative:`,
     "",
-    `--- BEGIN ${agent.name} instructions (${source}) ---`,
     agent.body.trim(),
-    `--- END ${agent.name} instructions ---`,
   ].join("\n");
 }
 
@@ -616,16 +610,14 @@ function buildHarnessPrompt(
   prompt: string,
   sessionStartReason: "startup" | "resume",
 ): string {
-  const taskKind = sessionStartReason === "resume" ? "follow-up task" : "initial task";
+  const taskKind = sessionStartReason === "resume" ? "follow-up task" : "task";
   return [
-    `You are the ${agent.name} subagent. The parent agent is delegating this ${taskKind} to you.`,
-    "The previous transcript, if any, is context only. The active task is delimited below.",
+    `Parent ${taskKind} for the ${agent.name} subagent.`,
+    "Inherited transcript, if present, is read-only background; the active instruction is inside <parent_task>.",
     "",
     "<parent_task>",
     prompt,
     "</parent_task>",
-    "",
-    "Work within your subagent role instructions and respond to the parent agent with the requested result.",
   ].join("\n");
 }
 
