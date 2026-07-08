@@ -373,6 +373,9 @@ async function runPrompt(options: {
         dispose(): void;
         messages: unknown[];
         sessionFile: string | undefined;
+        extensionRunner: {
+          emit(event: { type: "session_shutdown"; reason: "quit" }): Promise<unknown>;
+        };
       }
     | undefined;
 
@@ -382,7 +385,21 @@ async function runPrompt(options: {
   };
   const cleanups = bindAbortSignals(abort, options.signal, options.ctx.signal);
 
+  let progressStopped = false;
+  let progressTimer: ReturnType<typeof setInterval> | undefined;
   const progress = () => {
+    if (progressStopped) return;
+    try {
+      emitProgress();
+    } catch {
+      // The parent session was replaced or reloaded mid-run, so its ctx-bound
+      // onUpdate callback is stale. Stop reporting progress; the run itself
+      // continues and its result is returned to whoever awaits it.
+      progressStopped = true;
+      if (progressTimer) clearInterval(progressTimer);
+    }
+  };
+  const emitProgress = () => {
     options.onUpdate?.({
       content: [
         {
@@ -404,7 +421,7 @@ async function runPrompt(options: {
     });
   };
 
-  const progressTimer = setInterval(progress, 5000);
+  progressTimer = setInterval(progress, 5000);
   progress();
 
   let softTimer: ReturnType<typeof setTimeout> | undefined;
@@ -546,9 +563,24 @@ async function runPrompt(options: {
   } finally {
     if (softTimer) clearTimeout(softTimer);
     if (hardTimer) clearTimeout(hardTimer);
-    clearInterval(progressTimer);
+    if (progressTimer) clearInterval(progressTimer);
     for (const cleanup of cleanups) cleanup();
-    activeSession?.dispose();
+    if (activeSession) {
+      // AgentSession.dispose() invalidates every bound extension ctx WITHOUT
+      // emitting session_shutdown. Extensions that start timers on
+      // session_start (e.g. usage-footer extensions) would keep firing
+      // against a stale ctx and crash pi from a timer callback. Emit the
+      // shutdown event ourselves so they can clean up first.
+      try {
+        await activeSession.extensionRunner.emit({
+          type: "session_shutdown",
+          reason: "quit",
+        });
+      } catch {
+        // Best effort: dispose regardless.
+      }
+      activeSession.dispose();
+    }
   }
 }
 

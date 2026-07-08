@@ -1,16 +1,104 @@
 import { fileURLToPath } from "node:url";
+import { Markdown, Text, Container } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getMarkdownTheme, keyHint, type AgentToolResult, type ExtensionAPI, type Theme, type ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
 import { SubagentRegistry } from "./registry.ts";
 import {
   executeListSubagents,
   executeMessageSubagent,
   executeSpawnSubagent,
 } from "./run.ts";
+import { installStaleCtxGuard } from "./stale-ctx-guard.ts";
 
 const SELF_EXTENSION_PATH = fileURLToPath(import.meta.url);
+const COLLAPSED_RESPONSE_LINES = 16;
+
+interface SubagentResponsePayload {
+  subagent_id?: string;
+  response?: string;
+  error?: {
+    code?: string;
+    message?: string;
+  };
+}
+
+function renderSubagentCall(
+  verb: "spawn" | "message",
+  typeOrId: string | undefined,
+  theme: Theme,
+): Text {
+  const subject = typeOrId?.trim() || "default";
+  return new Text(
+    `${theme.fg("toolTitle", theme.bold(verb))} ${theme.fg("accent", subject)} ${theme.fg("toolTitle", "subagent")}`,
+    0,
+    0,
+  );
+}
+
+function renderSubagentResult(
+  result: AgentToolResult<unknown>,
+  options: ToolRenderResultOptions,
+  theme: Theme,
+): Container | Text | Markdown {
+  const text = result.content
+    .filter((part): part is { type: "text"; text: string } => part.type === "text")
+    .map((part) => part.text)
+    .join("\n");
+
+  if (options.isPartial) {
+    return new Text(theme.fg("muted", text || "Working..."), 0, 0);
+  }
+
+  const payload = parseSubagentPayload(text);
+  if (payload?.error) {
+    return new Text(
+      theme.fg("error", `${payload.error.code ?? "ERROR"}: ${payload.error.message ?? "Subagent failed."}`),
+      0,
+      0,
+    );
+  }
+
+  const response = payload?.response ?? text;
+  const display = options.expanded ? response : collapseMarkdown(response, COLLAPSED_RESPONSE_LINES);
+  const container = new Container();
+  container.addChild(
+    new Markdown(display || theme.fg("muted", "No response."), 0, 0, getMarkdownTheme(), {
+      color: (value: string) => theme.fg("toolOutput", value),
+    }),
+  );
+
+  const hint = !options.expanded
+    ? response !== display
+      ? `\n... (${keyHint("app.tools.expand", "to expand")})`
+      : `\n(${keyHint("app.tools.expand", "to expand")})`
+    : `\n(${keyHint("app.tools.expand", "to collapse")})`;
+  container.addChild(new Text(theme.fg("muted", hint), 0, 0));
+
+  return container;
+}
+
+function parseSubagentPayload(text: string): SubagentResponsePayload | undefined {
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (!parsed || typeof parsed !== "object") return undefined;
+    return parsed as SubagentResponsePayload;
+  } catch {
+    return undefined;
+  }
+}
+
+function collapseMarkdown(markdown: string, maxLines: number): string {
+  const lines = markdown.trimEnd().split("\n");
+  if (lines.length <= maxLines) return markdown;
+  return lines.slice(0, maxLines).join("\n");
+}
 
 export default function simpleSubagents(pi: ExtensionAPI) {
+  // Protect the whole process from ANY extension (local or 3rd party) that
+  // touches a stale ctx from a timer/detached promise after session
+  // replacement, reload, or subagent-session disposal.
+  installStaleCtxGuard();
+
   const registry = new SubagentRegistry();
 
   pi.on("session_start", (_event, ctx) => {
@@ -51,6 +139,8 @@ export default function simpleSubagents(pi: ExtensionAPI) {
         ctx,
         SELF_EXTENSION_PATH,
       ),
+    renderCall: (args, theme) => renderSubagentCall("spawn", args.subagent_type, theme),
+    renderResult: (result, options, theme) => renderSubagentResult(result, options, theme),
   });
 
   pi.registerTool({
@@ -75,5 +165,7 @@ export default function simpleSubagents(pi: ExtensionAPI) {
         ctx,
         SELF_EXTENSION_PATH,
       ),
+    renderCall: (args, theme) => renderSubagentCall("message", args.subagent_id, theme),
+    renderResult: (result, options, theme) => renderSubagentResult(result, options, theme),
   });
 }
