@@ -385,6 +385,13 @@ async function runPrompt(options: {
   };
   const cleanups = bindAbortSignals(abort, options.signal, options.ctx.signal);
 
+  let baselineUsage: UsageSummary | undefined;
+  const currentRunUsage = () => {
+    if (!activeSession) return undefined;
+    const current = summarizeUsage(activeSession.messages);
+    return baselineUsage ? subtractUsage(current, baselineUsage) : current;
+  };
+
   let progressStopped = false;
   let progressTimer: ReturnType<typeof setInterval> | undefined;
   const progress = () => {
@@ -416,7 +423,7 @@ async function runPrompt(options: {
         elapsedMs: Date.now() - start,
         model: config.modelLabel,
         thinking: config.thinking,
-        usage: activeSession ? summarizeUsage(activeSession.messages) : undefined,
+        usage: currentRunUsage(),
         warnings,
       },
     });
@@ -439,6 +446,7 @@ async function runPrompt(options: {
       warnings,
     });
     activeSession = session;
+    baselineUsage = summarizeUsage(session.messages);
 
     const unsubscribe = session.subscribe((event) => {
       if (event.type === "tool_execution_start" || event.type === "tool_execution_update") {
@@ -488,6 +496,7 @@ async function runPrompt(options: {
         start,
         config,
         warnings,
+        baselineUsage,
       );
     }
 
@@ -503,6 +512,7 @@ async function runPrompt(options: {
       start,
       config,
       warnings,
+      baselineUsage,
     );
   } catch (error) {
     if (hardTimedOut) {
@@ -516,7 +526,7 @@ async function runPrompt(options: {
           elapsedMs: Date.now() - start,
           model: config.modelLabel,
           thinking: config.thinking,
-          usage: activeSession ? summarizeUsage(activeSession.messages) : undefined,
+          usage: currentRunUsage(),
           warnings,
         },
       );
@@ -834,6 +844,7 @@ function successResult(
   start: number,
   config: ResolvedRunConfig,
   warnings: string[],
+  baselineUsage?: UsageSummary,
 ): AgentToolResult<SubagentToolDetails> {
   return jsonResult(
     {
@@ -847,7 +858,9 @@ function successResult(
       elapsedMs: Date.now() - start,
       model: config.modelLabel,
       thinking: config.thinking,
-      usage: summarizeUsage(session.messages),
+      usage: baselineUsage
+        ? subtractUsage(summarizeUsage(session.messages), baselineUsage)
+        : summarizeUsage(session.messages),
       warnings,
     },
   );
@@ -945,6 +958,25 @@ function summarizeUsage(messages: unknown[]): UsageSummary {
   }
 
   return summary;
+}
+
+function subtractUsage(current: UsageSummary, baseline: UsageSummary): UsageSummary {
+  const subtract = (a: number, b: number) => Math.max(0, a - b);
+  return {
+    assistantTurns: subtract(current.assistantTurns, baseline.assistantTurns),
+    input: subtract(current.input, baseline.input),
+    output: subtract(current.output, baseline.output),
+    cacheRead: subtract(current.cacheRead, baseline.cacheRead),
+    cacheWrite: subtract(current.cacheWrite, baseline.cacheWrite),
+    totalTokens: subtract(current.totalTokens, baseline.totalTokens),
+    cost: {
+      input: subtract(current.cost.input, baseline.cost.input),
+      output: subtract(current.cost.output, baseline.cost.output),
+      cacheRead: subtract(current.cost.cacheRead, baseline.cost.cacheRead),
+      cacheWrite: subtract(current.cost.cacheWrite, baseline.cost.cacheWrite),
+      total: subtract(current.cost.total, baseline.cost.total),
+    },
+  };
 }
 
 function serializeTranscript(messages: unknown[]): string {
