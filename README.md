@@ -24,9 +24,9 @@ After installing or editing the package, run `/reload` in Pi.
 
 ## Agent Definitions
 
-Built-in agents live in this package's `agents/` directory. User agents can be
-added in `~/.pi/agent/agents/*.md`. A user agent with the same `name` as a
-built-in overrides it.
+The package ships only the minimal `general` agent in its `agents/` directory.
+Add personal agents in `~/.pi/agent/agents/*.md`. A personal agent with the same
+`name` as a built-in overrides it.
 
 Project-local `.pi/agents` files are deliberately ignored.
 
@@ -34,13 +34,13 @@ Example:
 
 ```markdown
 ---
-name: worker
-description: Implementation subagent for narrow, coherent edits.
-model: openai-codex/gpt-5.5
+name: specialist
+description: Personal subagent for a focused task.
+model: provider/model
 thinking: medium
-tools: [read, bash, edit, write]
+tools: [read, bash]
 skills: []
-context: fork
+context: fresh
 ---
 System prompt body...
 ```
@@ -56,10 +56,10 @@ All settings are optional under `simpleSubagents` in `~/.pi/agent/settings.json`
 {
   "simpleSubagents": {
     "defaultModel": "provider/model",
-    "defaultSubagentTypeId": "worker",
+    "defaultSubagentTypeId": "general",
     "defaultThinking": "medium",
     "builtinSubagentOverrides": {
-      "worker": { "model": "provider/model", "thinking": "medium" }
+      "general": { "model": "provider/model", "thinking": "medium" }
     },
     "summarizeOnTimeout": false,
     "timeoutSummaryModel": "provider/model",
@@ -76,5 +76,5 @@ Subagent sessions are real Pi sessions and remain resumable. They use a
 synthetic cwd below the current project so they do not clutter the default
 project session list, but they are visible in the all-sessions view.
 
-The `researcher` built-in expects web tools from the `pi-web-access` extension,
-including `web_search`, `fetch_content`, `get_search_content`, and `fetch`.
+Personal agent definitions can select tools supplied by other installed
+extensions.

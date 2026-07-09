@@ -21,8 +21,9 @@ Simple subagents lets the main agent delegate work to specialized subagents via
   **hard timeout** (abort + model-generated summary returned in place of the
   subagent's response).
 
-All configuration lives in namespaced fields under `simpleSubagents` in
-`~/.pi/agent/settings.json`.
+Runtime configuration lives in namespaced fields under `simpleSubagents` in
+`~/.pi/agent/settings.json`. Personal agent definitions live in
+`~/.pi/agent/agents/*.md`.
 
 ## Repository / Package Layout
 
@@ -37,11 +38,7 @@ pi-simple-subagents/
 │   ├── agents.ts         # agent type discovery + frontmatter parsing
 │   ├── run.ts            # subagent session creation, timeouts, semaphore
 │   └── registry.ts       # subagent_id → session-file mapping + persistence
-└── agents/               # built-in subagent types (shipped in the package)
-    ├── worker.md
-    ├── reviewer.md
-    ├── researcher.md
-    ├── explorer.md
+└── agents/               # minimal built-in subagent shipped in the package
     └── general.md
 ```
 
@@ -64,9 +61,9 @@ pi-simple-subagents/
 }
 ```
 
-Built-in agent `.md` files ship inside the package (`agents/` directory,
-resolved relative to the extension module) — they are **not** copied into
-`~/.pi/agent/agents`.
+The built-in `general` agent `.md` file ships inside the package (`agents/`
+directory, resolved relative to the extension module) — it is **not** copied
+into `~/.pi/agent/agents`.
 
 ## Installation (as a user would)
 
@@ -102,7 +99,7 @@ Output:
 
 ```ts
 {
-  subagent_id: string,     // auto-generated, e.g. "worker-a1b2c3"
+  subagent_id: string,     // auto-generated, e.g. "general-a1b2c3"
   response?: string,
   error?: { code: string, message: string }
 }
@@ -184,13 +181,13 @@ Markdown files with YAML frontmatter. The body is the subagent's system prompt.
 
 ```markdown
 ---
-name: worker
-description: Implementation subagent for narrow, coherent edits.
-model: openai-codex/gpt-5.5     # optional
-thinking: medium                 # optional
-tools: [read, bash, edit, write] # list, comma string, or "all"
-skills: []                       # list, comma string, or "all"
-context: fork                    # "fork" | "fresh" (default: fresh)
+name: specialist
+description: Personal subagent for a focused task.
+model: provider/model     # optional
+thinking: medium          # optional
+tools: [read, bash]       # list, comma string, or "all"
+skills: []                # list, comma string, or "all"
+context: fresh            # "fork" | "fresh" (default: fresh)
 ---
 System prompt body…
 ```
@@ -233,9 +230,8 @@ itself**. After `createAgentSession()`, the extension must call
 lifecycle (`session_start`, `resources_discover`, etc.) — without this, MCP
 adapters and other lifecycle-dependent extensions will not initialize.
 
-- Rationale: built-in agents depend on extension tools (`researcher` requires
-  `web_search`/`fetch_content` from pi-web-access); safety extensions
-  (truncate-bash, default-bash-timeout) should also protect subagent runs.
+- Rationale: personal agents may depend on extension tools, and safety
+  extensions should also protect subagent runs.
 - Excluding simple-subagents means **no recursion**: subagents cannot spawn
   subagents. Predictable cost, no timeout pyramids.
 - **Project-local extensions** (`.pi/extensions/`) are **excluded** from
@@ -245,24 +241,14 @@ adapters and other lifecycle-dependent extensions will not initialize.
 - Extension hooks (e.g. `tool_result` truncation) remain active even for tools
   filtered out by the `tools:` allowlist.
 
-### Built-in agents
+### Built-in agent
 
-| Agent        | Purpose                                             | context | tools                                                        |
-|--------------|-----------------------------------------------------|---------|--------------------------------------------------------------|
-| `worker`     | Implementation: narrow, coherent edits              | fork    | read, bash, edit, write                                      |
-| `reviewer`   | Strict quality/maintainability review               | fresh   | read, bash                                                   |
-| `researcher` | Autonomous web research brief                       | fresh   | read, bash, web_search, fetch_content, get_search_content, fetch |
-| `explorer`   | Codebase recon → compressed handoff                 | fresh   | all                                                          |
-| `general`      | No instructions beyond the main agent's prompt      | fresh   | all                                                          |
+| Agent     | Purpose                                        | context | tools |
+|-----------|------------------------------------------------|---------|-------|
+| `general` | No instructions beyond the main agent's prompt | fresh   | all   |
 
-(Source files: `worker.md`, `reviewer.md`, `researcher.md`, `explorer.md`,
-`general.md`. The `worker.md` `description` field must be
-filled in before release.)
-
-> **Dependency note:** `researcher` requires `web_search`, `fetch_content`,
-> and related tools from the `pi-web-access` extension. Users without this
-> extension installed will get a non-functional researcher. Document this
-> dependency in `README.md`.
+Specialized agents are personal configuration and belong in
+`~/.pi/agent/agents/*.md`, not in the package.
 
 ## Execution Model
 
@@ -286,13 +272,12 @@ filled in before release.)
 
 ### `response`
 
-The text content of the subagent's **final assistant message** for that run
-(the built-in agent prompts mandate a closing structured report). Not the full
-transcript.
+The text content of the subagent's **final assistant message** for that run,
+not the full transcript.
 
 ### subagent_id & persistence
 
-- Format: `<type>-<shortHash>`, e.g. `worker-a1b2c3` (6 hex chars, unique per
+- Format: `<type>-<shortHash>`, e.g. `general-a1b2c3` (6 hex chars, unique per
   main session).
 - The `id → session file` mapping is **persisted into the main session** via
   `pi.appendEntry()` (custom entry type, e.g. `simple-subagents:spawn`).
@@ -370,7 +355,7 @@ One-line streaming progress per running subagent via the tool `onUpdate`
 callback, rendered by pi's default renderers (no custom TUI components):
 
 ```
-⏳ worker-a1b2c3 · 4m12s · bash: npm test
+⏳ general-a1b2c3 · 4m12s · bash: npm test
 ```
 
 Updated on subagent tool activity and elapsed time. Final result uses default
@@ -385,11 +370,10 @@ tool result `details`.
 {
   "simpleSubagents": {
     "defaultModel": "provider/model",        // fallback model for all subagents
-    "defaultSubagentTypeId": "worker",       // used when subagent_type is omitted
+    "defaultSubagentTypeId": "general",      // used when subagent_type is omitted
     "defaultThinking": "medium",             // fallback thinking level
     "builtinSubagentOverrides": {            // per-agent-name overrides (any agent)
-      "worker":   { "model": "…", "thinking": "…" },
-      "reviewer": { "model": "…" }
+      "general": { "model": "…", "thinking": "…" }
     },
     "summarizeOnTimeout": false,             // opt-in; make a model call to summarize on hard timeout
     "timeoutSummaryModel": "provider/model", // summarizer model (only when summarizeOnTimeout is true)
