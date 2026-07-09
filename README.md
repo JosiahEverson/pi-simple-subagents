@@ -2,11 +2,12 @@
 
 Lightweight synchronous subagents for Pi.
 
-This package adds three tools:
+This package adds four tools:
 
 - `list_subagents` shows available subagent types.
-- `spawn_subagent` starts a persistent Pi session for a subagent and waits for its response.
-- `message_subagent` sends a follow-up prompt to a previously spawned subagent.
+- `get_scoped_models` lists allowed model overrides from Pi's `enabledModels` scope.
+- `spawn_subagent` starts a persistent Pi session and accepts an optional `model` override.
+- `message_subagent` sends a follow-up prompt to a spawned subagent.
 
 ## Install
 
@@ -47,6 +48,13 @@ System prompt body...
 
 `tools` and `skills` accept a YAML list, a comma-separated string, or `all`.
 Omitting `tools` or `skills` means `all`.
+
+## Model Overrides
+
+Only pass `spawn_subagent.model` when the user requests an override. Call
+`get_scoped_models` first and use an exact returned `provider/model` value.
+The tool resolves Pi's `enabledModels`; when unset or empty, it returns all
+authenticated models.
 
 ## Settings
 

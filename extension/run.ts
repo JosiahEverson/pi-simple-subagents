@@ -5,6 +5,7 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   getAgentDir,
+  resolveModelScopeWithDiagnostics,
   SessionManager,
   SettingsManager,
   type AgentToolResult,
@@ -41,6 +42,7 @@ const TOOL_NAMES = {
   spawn: "spawn_subagent",
   message: "message_subagent",
   list: "list_subagents",
+  models: "get_scoped_models",
 } as const;
 
 const SELF_TOOL_NAMES = new Set<string>(Object.values(TOOL_NAMES));
@@ -95,6 +97,7 @@ interface UsageSummary {
 interface SpawnParams {
   subagent_type?: string;
   prompt: string;
+  model?: string;
 }
 
 interface MessageParams {
@@ -103,6 +106,21 @@ interface MessageParams {
 }
 
 let semaphore: Semaphore | undefined;
+
+export async function executeGetScopedModels(
+  ctx: ExtensionContext,
+): Promise<AgentToolResult<SubagentToolDetails>> {
+  const scoped = await getScopedModelOptions(ctx);
+  return {
+    content: [
+      {
+        type: "text",
+        text: scoped.options.map((option) => option.id).join("\n") || "No scoped models available.",
+      },
+    ],
+    details: { warnings: scoped.warnings },
+  };
+}
 
 export async function executeListSubagents(
   pi: Pick<ExtensionAPI, "getAllTools" | "getCommands" | "getThinkingLevel">,
@@ -191,6 +209,26 @@ export async function executeSpawnSubagent(
     );
   }
 
+  let modelOverride: Model<any> | undefined;
+  let scopeWarnings: string[] = [];
+  if (params.model !== undefined) {
+    const scoped = await getScopedModelOptions(ctx);
+    scopeWarnings = scoped.warnings;
+    const requested = params.model.trim();
+    modelOverride = scoped.options.find((option) => option.id === requested)?.model;
+    if (!modelOverride) {
+      return jsonResult(
+        {
+          error: {
+            code: "MODEL_NOT_SCOPED",
+            message: `Model override was not returned by get_scoped_models: ${params.model}`,
+          },
+        },
+        { warnings: [...discovered.diagnostics, ...scopeWarnings] },
+      );
+    }
+  }
+
   setConcurrency(settings);
   const release = await getSemaphore().acquire(mergeSignals(signal, ctx.signal));
   try {
@@ -221,7 +259,8 @@ export async function executeSpawnSubagent(
       ctx,
       selfExtensionPath,
       mainThinking: pi.getThinkingLevel(),
-      diagnostics: discovered.diagnostics,
+      diagnostics: [...discovered.diagnostics, ...scopeWarnings],
+      modelOverride,
     });
 
     return result;
@@ -378,6 +417,7 @@ async function runPrompt(options: {
   selfExtensionPath: string;
   mainThinking: ThinkingLevel;
   diagnostics: string[];
+  modelOverride?: Model<any>;
 }): Promise<AgentToolResult<SubagentToolDetails>> {
   const start = Date.now();
   const warnings = [...options.diagnostics];
@@ -386,6 +426,7 @@ async function runPrompt(options: {
     options.settings,
     options.ctx,
     options.mainThinking,
+    options.modelOverride,
   );
   warnings.push(...config.warnings);
 
@@ -769,11 +810,12 @@ function resolveRunConfig(
   settings: SimpleSubagentsSettings,
   ctx: ExtensionContext,
   mainThinking: ThinkingLevel,
+  modelOverride?: Model<any>,
 ): ResolvedRunConfig {
   const warnings: string[] = [];
   const override = settings.builtinSubagentOverrides?.[agent.name];
   const modelSpec = override?.model ?? agent.model ?? settings.defaultModel;
-  const model = resolveModel(modelSpec, ctx.model, ctx.modelRegistry, warnings);
+  const model = modelOverride ?? resolveModel(modelSpec, ctx.model, ctx.modelRegistry, warnings);
   const thinking = override?.thinking ?? agent.thinking ?? settings.defaultThinking ?? mainThinking;
 
   return {
@@ -813,6 +855,45 @@ function resolveModel(
     return fallback;
   }
   return model;
+}
+
+async function getScopedModelOptions(ctx: ExtensionContext): Promise<{
+  options: Array<{ id: string; model: Model<any> }>;
+  warnings: string[];
+}> {
+  ctx.modelRegistry.refresh();
+  const available = ctx.modelRegistry.getAvailable();
+  const settingsManager = SettingsManager.create(ctx.cwd, getAgentDir(), {
+    projectTrusted: ctx.isProjectTrusted(),
+  });
+  const patterns = settingsManager.getEnabledModels();
+  const settingsWarnings = settingsManager
+    .drainErrors()
+    .map(({ error }) => `Pi settings: ${error.message}`);
+
+  if (!patterns || patterns.length === 0) {
+    return { options: toModelOptions(available), warnings: settingsWarnings };
+  }
+
+  const resolved = await resolveModelScopeWithDiagnostics(patterns, ctx.modelRegistry);
+  return {
+    options: toModelOptions(
+      resolved.scopedModels.length > 0
+        ? resolved.scopedModels.map(({ model }) => model)
+        : available,
+    ),
+    warnings: [
+      ...settingsWarnings,
+      ...resolved.diagnostics.map(({ message }) => message),
+    ],
+  };
+}
+
+function toModelOptions(models: Model<any>[]): Array<{ id: string; model: Model<any> }> {
+  return models.map((model) => ({
+    id: `${model.provider}/${model.id}`,
+    model,
+  }));
 }
 
 function parseModelSpec(

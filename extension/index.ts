@@ -5,6 +5,7 @@ import { getAgentDir, getMarkdownTheme, keyHint, type AgentToolResult, type Exte
 import { discoverAgents, type AgentContextMode } from "./agents.ts";
 import { SubagentRegistry } from "./registry.ts";
 import {
+  executeGetScopedModels,
   executeListSubagents,
   executeMessageSubagent,
   executeSpawnSubagent,
@@ -15,8 +16,7 @@ import { installStaleCtxGuard } from "./stale-ctx-guard.ts";
 
 const SELF_EXTENSION_PATH = fileURLToPath(import.meta.url);
 const COLLAPSED_RESPONSE_LINES = 16;
-const SUBAGENT_TYPE_DESCRIPTION =
-  "Exact subagent type id from list_subagents. Do not infer, abbreviate, or convert names.";
+const SUBAGENT_TYPE_DESCRIPTION = "Exact id from list_subagents.";
 
 interface SubagentResponsePayload {
   subagent_id?: string;
@@ -157,29 +157,36 @@ export default function simpleSubagents(pi: ExtensionAPI) {
   pi.registerTool({
     name: "list_subagents",
     label: "List Subagents",
-    description:
-      "List available subagent types and their resolved model, tools, skills, and context behavior. Call this before delegating if you need to know which subagent type to use.",
-    promptSnippet:
-      "List available subagent types with list_subagents before choosing a specialized delegate.",
+    description: "List subagent types.",
+    promptSnippet: "List subagent types before choosing one.",
     parameters: Type.Object({}),
     execute: (_toolCallId, _params, _signal, _onUpdate, ctx) =>
       executeListSubagents(pi, ctx),
   });
 
   pi.registerTool({
+    name: "get_scoped_models",
+    label: "Get Scoped Models",
+    description: "List allowed model overrides from Pi's enabledModels.",
+    promptSnippet: "List allowed model overrides.",
+    parameters: Type.Object({}),
+    execute: (_toolCallId, _params, _signal, _onUpdate, ctx) =>
+      executeGetScopedModels(ctx),
+  });
+
+  pi.registerTool({
     name: "spawn_subagent",
     label: "Spawn Subagent",
-    description:
-      "Create a persistent Pi subagent session of the requested type, send it an initial prompt, and wait synchronously for its final response. Use an exact subagent_type from list_subagents.",
-    promptSnippet:
-      "Delegate bounded work to a persistent subagent session with spawn_subagent using an exact subagent_type from list_subagents.",
+    description: "Spawn a subagent; override model only if the user asks and after get_scoped_models.",
+    promptSnippet: "Spawn a subagent.",
     promptGuidelines: [
-      "Before calling spawn_subagent, call list_subagents unless the exact subagent_type string came from the user or a prior list_subagents result in the current conversation.",
-      "Use spawn_subagent subagent_type values exactly as listed by list_subagents. Do not infer, abbreviate, or convert subagent type names.",
+      "Before spawn_subagent, call list_subagents unless the user or this conversation already supplied the exact type id.",
+      "Set spawn_subagent.model only at the user's request; always call get_scoped_models first and use an exact result.",
     ],
     parameters: Type.Object({
       subagent_type: Type.Optional(Type.String({ description: SUBAGENT_TYPE_DESCRIPTION })),
       prompt: Type.String(),
+      model: Type.Optional(Type.String({ description: "Exact get_scoped_models result; user-requested only." })),
     }),
     executionMode: "parallel",
     execute: (_toolCallId, params, signal, onUpdate, ctx) =>
@@ -202,10 +209,8 @@ export default function simpleSubagents(pi: ExtensionAPI) {
   pi.registerTool({
     name: "message_subagent",
     label: "Message Subagent",
-    description:
-      "Send a follow-up prompt to a previously spawned subagent by id, resuming its persistent Pi session, and wait synchronously for its response.",
-    promptSnippet:
-      "Continue a previous subagent session with message_subagent when you have its subagent_id.",
+    description: "Continue a spawned subagent by id.",
+    promptSnippet: "Continue a spawned subagent by id.",
     parameters: Type.Object({
       subagent_id: Type.String(),
       prompt: Type.String(),

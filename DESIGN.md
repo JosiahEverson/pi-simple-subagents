@@ -77,9 +77,16 @@ Versioning via git tags (`@v0.1.0` pins a ref).
 
 ## Tools
 
-Three tools are registered. Tool descriptions are **generic** (progressive
-disclosure): they do not enumerate available types; they point at
-`list_subagents`. Sessions that never delegate pay near-zero context cost.
+Four tools are registered. Descriptions stay terse; catalogs are exposed only
+through `list_subagents` and `get_scoped_models`.
+
+### `get_scoped_models`
+
+Returns exact `provider/model` values allowed for spawn-time overrides. It
+resolves Pi's `enabledModels` patterns; when no usable scope exists, it returns
+all authenticated models.
+
+Input: `{}`
 
 ### `spawn_subagent`
 
@@ -91,9 +98,14 @@ Input:
 ```ts
 {
   subagent_type?: string,  // optional; falls back to settings.defaultSubagentTypeId
-  prompt: string
+  prompt: string,
+  model?: string           // exact value from get_scoped_models
 }
 ```
+
+`model` has highest model-resolution precedence. Prompt metadata tells the main
+agent to set it only at the user's request and to call `get_scoped_models`
+first. Values outside the current scope are rejected.
 
 Output:
 
@@ -147,8 +159,8 @@ Input: `{}`
 
 Output (as text content): one entry per type with `name`, `description`,
 `source` (`builtin` | `user`), resolved `model`/`thinking`, `tools` (resolved
-from the subagent's filtered namespace, excluding `spawn_subagent` /
-`message_subagent` / `list_subagents`), `skills`, `context`.
+from the subagent's filtered namespace, excluding all four tools from this
+extension), `skills`, `context`.
 
 ### Error codes
 
@@ -157,6 +169,7 @@ from the subagent's filtered namespace, excluding `spawn_subagent` /
 | `MISSING_SUBAGENT_TYPE` | `subagent_type` omitted and no `defaultSubagentTypeId` set |
 | `UNKNOWN_SUBAGENT_TYPE` | Named type not found                                       |
 | `UNKNOWN_SUBAGENT_ID`   | `message_subagent` id not in the registry                  |
+| `MODEL_NOT_SCOPED`      | Spawn model was not returned by `get_scoped_models`        |
 | `SUBAGENT_FAILED`       | Provider/runtime error inside the subagent run             |
 | `ABORTED`               | User aborted (Esc) while the subagent was running          |
 
@@ -290,12 +303,13 @@ not the full transcript.
 
 Resolved independently for `model` and `thinking`, highest precedence first:
 
-1. `simpleSubagents.builtinSubagentOverrides[<name>]` — despite the field name
+1. Spawn-time `model` override (model only).
+2. `simpleSubagents.builtinSubagentOverrides[<name>]` — despite the field name
    (kept per original spec), applies to **any agent by name**, built-in or
    custom.
-2. Agent frontmatter (`model:` / `thinking:`).
-3. `simpleSubagents.defaultModel` / `simpleSubagents.defaultThinking`.
-4. The main session's current model / thinking level.
+3. Agent frontmatter (`model:` / `thinking:`).
+4. `simpleSubagents.defaultModel` / `simpleSubagents.defaultThinking`.
+5. The main session's current model / thinking level.
 
 ## Timeouts
 
