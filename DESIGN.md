@@ -99,13 +99,15 @@ Input:
 {
   subagent_type?: string,  // optional; falls back to settings.defaultSubagentTypeId
   prompt: string,
-  model?: string           // exact value from get_scoped_models
+  model?: string,          // exact value from get_scoped_models
+  thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh"
 }
 ```
 
-`model` has highest model-resolution precedence. Prompt metadata tells the main
-agent to set it only at the user's request and to call `get_scoped_models`
-first. Values outside the current scope are rejected.
+Spawn overrides have highest resolution precedence. Prompt metadata tells the
+main agent to set either only at the user's request and to call
+`get_scoped_models` before setting `model`. Values outside the current model
+scope are rejected. Thinking uses Pi's native levels and provider mapping.
 
 Output:
 
@@ -303,7 +305,7 @@ not the full transcript.
 
 Resolved independently for `model` and `thinking`, highest precedence first:
 
-1. Spawn-time `model` override (model only).
+1. Spawn-time `model` / `thinking` override.
 2. `simpleSubagents.builtinSubagentOverrides[<name>]` — despite the field name
    (kept per original spec), applies to **any agent by name**, built-in or
    custom.

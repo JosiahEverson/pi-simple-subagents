@@ -177,16 +177,29 @@ export default function simpleSubagents(pi: ExtensionAPI) {
   pi.registerTool({
     name: "spawn_subagent",
     label: "Spawn Subagent",
-    description: "Spawn a subagent; override model only if the user asks and after get_scoped_models.",
+    description: "Spawn a subagent; override model/thinking only if asked; model requires get_scoped_models.",
     promptSnippet: "Spawn a subagent.",
     promptGuidelines: [
       "Before spawn_subagent, call list_subagents unless the user or this conversation already supplied the exact type id.",
-      "Set spawn_subagent.model only at the user's request; always call get_scoped_models first and use an exact result.",
+      "Set model or thinking only at the user's request; always call get_scoped_models before model and use an exact result.",
     ],
     parameters: Type.Object({
       subagent_type: Type.Optional(Type.String({ description: SUBAGENT_TYPE_DESCRIPTION })),
       prompt: Type.String(),
       model: Type.Optional(Type.String({ description: "Exact get_scoped_models result; user-requested only." })),
+      thinking: Type.Optional(
+        Type.Union(
+          [
+            Type.Literal("off"),
+            Type.Literal("minimal"),
+            Type.Literal("low"),
+            Type.Literal("medium"),
+            Type.Literal("high"),
+            Type.Literal("xhigh"),
+          ],
+          { description: "User-requested Pi thinking level." },
+        ),
+      ),
     }),
     executionMode: "parallel",
     execute: (_toolCallId, params, signal, onUpdate, ctx) =>

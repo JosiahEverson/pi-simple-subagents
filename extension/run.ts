@@ -98,6 +98,7 @@ interface SpawnParams {
   subagent_type?: string;
   prompt: string;
   model?: string;
+  thinking?: ThinkingLevel;
 }
 
 interface MessageParams {
@@ -261,6 +262,7 @@ export async function executeSpawnSubagent(
       mainThinking: pi.getThinkingLevel(),
       diagnostics: [...discovered.diagnostics, ...scopeWarnings],
       modelOverride,
+      thinkingOverride: params.thinking,
     });
 
     return result;
@@ -418,6 +420,7 @@ async function runPrompt(options: {
   mainThinking: ThinkingLevel;
   diagnostics: string[];
   modelOverride?: Model<any>;
+  thinkingOverride?: ThinkingLevel;
 }): Promise<AgentToolResult<SubagentToolDetails>> {
   const start = Date.now();
   const warnings = [...options.diagnostics];
@@ -427,6 +430,7 @@ async function runPrompt(options: {
     options.ctx,
     options.mainThinking,
     options.modelOverride,
+    options.thinkingOverride,
   );
   warnings.push(...config.warnings);
 
@@ -811,12 +815,14 @@ function resolveRunConfig(
   ctx: ExtensionContext,
   mainThinking: ThinkingLevel,
   modelOverride?: Model<any>,
+  thinkingOverride?: ThinkingLevel,
 ): ResolvedRunConfig {
   const warnings: string[] = [];
   const override = settings.builtinSubagentOverrides?.[agent.name];
   const modelSpec = override?.model ?? agent.model ?? settings.defaultModel;
   const model = modelOverride ?? resolveModel(modelSpec, ctx.model, ctx.modelRegistry, warnings);
-  const thinking = override?.thinking ?? agent.thinking ?? settings.defaultThinking ?? mainThinking;
+  const thinking =
+    thinkingOverride ?? override?.thinking ?? agent.thinking ?? settings.defaultThinking ?? mainThinking;
 
   return {
     model,
