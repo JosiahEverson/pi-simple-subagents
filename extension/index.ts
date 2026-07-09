@@ -15,6 +15,8 @@ import { installStaleCtxGuard } from "./stale-ctx-guard.ts";
 
 const SELF_EXTENSION_PATH = fileURLToPath(import.meta.url);
 const COLLAPSED_RESPONSE_LINES = 16;
+const SUBAGENT_TYPE_DESCRIPTION =
+  "Exact subagent type id from list_subagents. Do not infer, abbreviate, or convert names.";
 
 interface SubagentResponsePayload {
   subagent_id?: string;
@@ -168,11 +170,15 @@ export default function simpleSubagents(pi: ExtensionAPI) {
     name: "spawn_subagent",
     label: "Spawn Subagent",
     description:
-      "Create a persistent Pi subagent session of the requested type, send it an initial prompt, and wait synchronously for its final response.",
+      "Create a persistent Pi subagent session of the requested type, send it an initial prompt, and wait synchronously for its final response. Use an exact subagent_type from list_subagents.",
     promptSnippet:
-      "Delegate bounded work to a persistent subagent session with spawn_subagent.",
+      "Delegate bounded work to a persistent subagent session with spawn_subagent using an exact subagent_type from list_subagents.",
+    promptGuidelines: [
+      "Before calling spawn_subagent, call list_subagents unless the exact subagent_type string came from the user or a prior list_subagents result in the current conversation.",
+      "Use spawn_subagent subagent_type values exactly as listed by list_subagents. Do not infer, abbreviate, or convert subagent type names.",
+    ],
     parameters: Type.Object({
-      subagent_type: Type.Optional(Type.String()),
+      subagent_type: Type.Optional(Type.String({ description: SUBAGENT_TYPE_DESCRIPTION })),
       prompt: Type.String(),
     }),
     executionMode: "parallel",
