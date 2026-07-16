@@ -1,440 +1,988 @@
-# simple subagents — Design Specification
+# pi-simple-subagents Design
 
-An extremely lightweight subagent extension for [pi](https://github.com/badlogic/pi-mono).
-Repository: `github.com/JosiahEverson/pi-simple-subagents` · License: **0BSD**
+## 1. Architecture Overview
 
-## Overview
-
-Simple subagents lets the main agent delegate work to specialized subagents via
-**synchronous tool calls**. Each subagent is a real pi agent session:
-
-- Runs **in-process** via the pi SDK (`createAgentSession()`), not a subprocess.
-- Its session is stored as a **real pi session** — it can be opened/resumed
-  like any session and **never expires**. Subagent sessions use a synthetic
-  cwd so they are hidden from the project session list but visible in the
-  all-sessions view (TAB in `/resume`).
-- The main agent can send **follow-up prompts** to a completed subagent by id,
-  exactly like a user messaging the main agent.
-- Subagents are **batched** naturally through pi's parallel tool execution,
-  bounded by a configurable concurrency limit (semaphore; excess calls queue).
-- Subagents have a **soft timeout** (steer a "wrap up" instruction) and a
-  **hard timeout** (abort + model-generated summary returned in place of the
-  subagent's response).
-
-Runtime configuration lives in namespaced fields under `simpleSubagents` in
-`~/.pi/agent/settings.json`. Personal agent definitions live in
-`~/.pi/agent/agents/*.md`.
-
-## Repository / Package Layout
+A single canonical intermediate representation — `RuntimeSubagentSpec` — decouples spawn configuration from any particular source. Every session-creation path, the registry, and the workflow library consume this one type.
 
 ```
-pi-simple-subagents/
-├── package.json          # pi package manifest
-├── LICENSE               # 0BSD
-├── README.md             # user-facing docs + install instructions
-├── DESIGN.md             # this document
-├── extension/
-│   ├── index.ts          # entry point (exports default function)
-│   ├── agents.ts         # agent type discovery + frontmatter parsing
-│   ├── run.ts            # subagent session creation, timeouts, semaphore
-│   └── registry.ts       # subagent_id → session-file mapping + persistence
-└── agents/               # minimal built-in subagent shipped in the package
-    └── general.md
+┌──────────────────────────────────────────────────────────────────────┐
+│  Extension (Pi tool surface)                                         │
+│                                                                      │
+│  spawn_subagent ──► resolveSpec() ──► RuntimeSubagentSpec            │
+│                                           │                          │
+│                                           ├──► createConfiguredSession()
+│                                           │        (shared)          │
+│                                           └──► registry.record(spec) │
+│                                                                      │
+│  message_subagent ──► registry.get() ──► persisted spec              │
+│                           │                                          │
+│                           └──► createConfiguredSession(spec)          │
+│                                                                      │
+│  get_scoped_models (unchanged scope logic)                           │
+└──────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────┐
+│  Workflow library (subpath export "pi-simple-subagents/workflow")     │
+│                                                                      │
+│  agent(task, opts) ──► resolveSpec() ──► RuntimeSubagentSpec         │
+│                                              │                       │
+│                                              └──► createAgentSession │
+│                                                   (Pi SDK direct)    │
+│  parallel(), pipeline(), phase(), log(), args, budget, journal       │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
-`package.json`:
+**Shared code** between extension and workflow library:
 
-```json
+- `RuntimeSubagentSpec` type and resolution/normalization logic
+- Model ID validation (scoped-model check)
+- Tool/skill filtering logic
+- System-prompt/harness-prompt construction
+
+**Not shared:**
+
+- Extension: TUI rendering, registry persistence, progress emission, semaphore, stale-ctx-guard
+- Workflow: journal, budget accounting, JSON Schema validation, parallel/pipeline primitives, stdout progress
+
+---
+
+## 2. Module / File Layout
+
+### Deleted
+
+| Path | Reason |
+|------|--------|
+| `agents/` (directory) | Personas removed entirely |
+| `extension/agents.ts` | Persona discovery/parsing removed |
+
+### Changed
+
+| Path | Changes |
+|------|---------|
+| `extension/index.ts` | Remove `list_subagents` tool registration; update `spawn_subagent` schema; update rendering for plain-text output; remove persona discovery imports |
+| `extension/run.ts` | Gut persona-based spawn; consume `RuntimeSubagentSpec` directly; plain-text output format; simplified `message_subagent` using persisted spec |
+| `extension/registry.ts` | Record schema with full spec persistence |
+| `extension/settings.ts` | Remove `builtinSubagentOverrides`, `defaultSubagentTypeId`; keep `defaultModel`, `defaultThinking`, `maxConcurrentSubagents`, timeout settings |
+| `package.json` | Add `exports` for subpath; add `workflow/` to `files`; add test script; adjust `pi.skills` |
+| `tsconfig.json` | Extend `include` to cover `workflow/**/*.ts` and `test/**/*.ts` |
+| `README.md` | Tool reference, settings, workflow usage |
+
+### Added
+
+| Path | Purpose |
+|------|---------|
+| `shared/spec.ts` | `RuntimeSubagentSpec` type, `resolveSpec()`, normalization, system-prompt builder, harness-prompt builder |
+| `shared/tools.ts` | Tool/skill filtering logic (extracted from run.ts) |
+| `shared/models.ts` | Model ID validation, scoped-model utilities |
+| `shared/types.ts` | Shared type re-exports (`ThinkingLevel`, `SelectionSpec`, etc.) |
+| `workflow/index.ts` | Public API: `agent()`, `parallel()`, `pipeline()`, `phase()`, `log()`, `createWorkflowRuntime()` |
+| `workflow/budget.ts` | Budget accounting and enforcement |
+| `workflow/journal.ts` | Run journal: persistence, keying, cache lookup, invalidation |
+| `workflow/schema.ts` | JSON Schema output validation with retry logic |
+| `workflow/semaphore.ts` | Re-export or fork of extension semaphore for workflow concurrency |
+| `workflow/types.ts` | Public types: `WorkflowBudget`, `JournalEntry`, `AgentOptions`, `WorkflowConfig` |
+| `test/spec.test.ts` | Spec resolution/normalization tests |
+| `test/journal.test.ts` | Journal keying, cache hit/miss, invalidation tests |
+| `test/schema.test.ts` | JSON Schema validation + retry decision tests |
+| `test/budget.test.ts` | Budget accounting tests |
+| `skills/subagent-workflows/SKILL.md` | Entry-point skill |
+| `skills/subagent-workflows/references/spawn-spec.md` | Spawn-spec authoring guide |
+| `skills/subagent-workflows/references/workflow-patterns.md` | Workflow script patterns |
+| `skills/subagent-workflows/references/schema-budget-journal.md` | Schema/budget/journal reference |
+| `skills/subagent-workflows/references/examples.md` | Worked examples |
+
+---
+
+## 3. Type Definitions
+
+### 3.1 ThinkingLevel and SelectionSpec
+
+```typescript
+// shared/types.ts
+
+export type ThinkingLevel =
+  | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+/**
+ * "all" means every available tool/skill (minus self-tools).
+ * string[] is an explicit allowlist of names.
+ */
+export type SelectionSpec = "all" | string[];
+```
+
+### 3.2 RuntimeSubagentSpec
+
+```typescript
+// shared/spec.ts
+
+export interface RuntimeSubagentSpec {
+  /** Display label for progress/logs and ID prefix. */
+  label: string;
+
+  /**
+   * Complete system prompt text delivered to the subagent session.
+   * Includes role instructions if any. Never empty.
+   */
+  systemPrompt: string;
+
+  /** Tool selection. "all" minus self-tools, or explicit allowlist. */
+  tools: SelectionSpec;
+
+  /** Skill selection. "all" or explicit allowlist. */
+  skills: SelectionSpec;
+
+  /**
+   * Exact resolved model ID in "provider/model" format.
+   * Resolved at spawn time and frozen for continuations.
+   */
+  modelId: string;
+
+  /** Thinking level for the session. */
+  thinking: ThinkingLevel;
+}
+```
+
+### 3.3 Spec Resolution
+
+```typescript
+// shared/spec.ts
+
+export interface SpawnInput {
+  task: string;
+  role?: string;
+  model?: string;
+  thinking?: ThinkingLevel;
+  tools?: string[];
+  skills?: string[];
+  label?: string;
+}
+
+export interface ResolutionContext {
+  /** Parent session's current model ID ("provider/model") */
+  parentModelId: string;
+  /** Parent session's current thinking level */
+  parentThinking: ThinkingLevel;
+  /** Settings: simpleSubagents.defaultModel */
+  defaultModel?: string;
+  /** Settings: simpleSubagents.defaultThinking */
+  defaultThinking?: ThinkingLevel;
+}
+
+/**
+ * Builds a RuntimeSubagentSpec from spawn-time arguments and resolution context.
+ * Pure function — no I/O.
+ */
+export function resolveSpec(input: SpawnInput, context: ResolutionContext): RuntimeSubagentSpec;
+```
+
+**Resolution precedence (model):**
+
+1. `input.model` (spawn arg — must be exact scoped-model ID, validated upstream)
+2. `context.defaultModel` (settings `simpleSubagents.defaultModel`)
+3. `context.parentModelId` (current parent model)
+
+**Resolution precedence (thinking):**
+
+1. `input.thinking` (spawn arg)
+2. `context.defaultThinking` (settings `simpleSubagents.defaultThinking`)
+3. `context.parentThinking` (parent session thinking)
+
+**System prompt construction:**
+
+```typescript
+function buildSystemPrompt(role: string | undefined): string {
+  if (role && role.trim().length > 0) {
+    return `You are a subagent.\n\n${role.trim()}`;
+  }
+  return "You are a subagent. Follow the instructions in your task exactly.";
+}
+```
+
+**Label derivation:**
+
+```typescript
+function deriveLabel(input: SpawnInput): string {
+  if (input.label) return sanitizeLabel(input.label);
+  // Derive from first meaningful word(s) of task, max 20 chars
+  return sanitizeLabel(input.task.slice(0, 20)) || "subagent";
+}
+
+function sanitizeLabel(raw: string): string {
+  return raw.replace(/[^a-zA-Z0-9_-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "") || "subagent";
+}
+```
+
+**Tools/skills:**
+
+- If `input.tools` is undefined → `"all"` (all available minus self-tools)
+- If `input.tools` is `[]` → no tools (model only)
+- If `input.tools` is `["read", "bash"]` → explicit allowlist
+- Same logic for skills
+
+### 3.4 Harness Prompt
+
+```typescript
+// shared/spec.ts
+
+export function buildHarnessPrompt(task: string, isFollowUp: boolean): string {
+  const kind = isFollowUp ? "Follow-up task" : "Task";
+  return [
+    `${kind} from the parent agent. Complete it and reply with your results.`,
+    "",
+    "<parent_task>",
+    task,
+    "</parent_task>",
+  ].join("\n");
+}
+```
+
+### 3.5 Registry Record
+
+```typescript
+// extension/registry.ts
+
+export const REGISTRY_ENTRY_TYPE = "simple-subagents:spawn";
+
+export interface RegistryRecord {
+  id: string;
+  spec: RuntimeSubagentSpec;
+  sessionFile: string;
+  createdAt: string;
+}
+```
+
+On `session_start`, rebuild scans custom entries matching the `REGISTRY_ENTRY_TYPE`.
+
+### 3.6 Tool Schemas
+
+#### `spawn_subagent`
+
+```typescript
+Type.Object({
+  task: Type.String({ description: "Complete task description for the subagent." }),
+  role: Type.Optional(Type.String({
+    description: "System-prompt role/instructions. Omit for a generic worker.",
+  })),
+  model: Type.Optional(Type.String({
+    description: "Exact model ID from get_scoped_models. Route by task fit; omit to inherit the default.",
+  })),
+  thinking: Type.Optional(Type.Union([
+    Type.Literal("off"), Type.Literal("minimal"), Type.Literal("low"),
+    Type.Literal("medium"), Type.Literal("high"), Type.Literal("xhigh"), Type.Literal("max"),
+  ], { description: "Thinking level override." })),
+  tools: Type.Optional(Type.Array(Type.String(), {
+    description: "Tool allowlist. Omit for all tools.",
+  })),
+  skills: Type.Optional(Type.Array(Type.String(), {
+    description: "Skill allowlist. Omit for all skills.",
+  })),
+  label: Type.Optional(Type.String({
+    description: "Short label for identification (used in progress and subagent_id).",
+  })),
+})
+```
+
+- `executionMode: "parallel"`
+- Prompt guidelines: model/thinking routing is an orchestrator decision — route deliberately per task; model overrides must be exact `get_scoped_models` IDs.
+
+#### `message_subagent`
+
+```typescript
+Type.Object({
+  subagent_id: Type.String({ description: "ID returned by spawn_subagent." }),
+  prompt: Type.String({ description: "Follow-up task or question." }),
+})
+```
+
+- `executionMode: "parallel"`
+
+#### `get_scoped_models`
+
+```typescript
+Type.Object({})
+```
+
+### 3.7 Tool Output Format
+
+Plain text, not JSON. First line is the id header; remainder is the raw markdown response.
+
+**Success:**
+
+```
+subagent_id: worker-a1b2c3
+<raw markdown response from subagent>
+```
+
+**Error:**
+
+```
+subagent_id: worker-a1b2c3
+ERROR [CODE]: message
+```
+
+Or without ID (when spawn fails before ID generation):
+
+```
+ERROR [MODEL_NOT_SCOPED]: Model override was not returned by get_scoped_models: bad/model
+```
+
+The `details` object retains structured metadata for TUI rendering:
+
+```typescript
+interface SubagentToolDetails {
+  subagent_id?: string;
+  sessionFile?: string;
+  elapsedMs?: number;
+  model?: string;
+  thinking?: ThinkingLevel;
+  usage?: UsageSummary;
+  warnings?: string[];
+}
+```
+
+---
+
+## 4. Workflow Library
+
+### 4.1 Package Export
+
+```jsonc
+// package.json (partial)
 {
-  "name": "pi-simple-subagents",
-  "version": "0.1.0",
-  "keywords": ["pi-package"],
-  "license": "0BSD",
-  "pi": {
-    "extensions": ["./extension/index.ts"]
+  "exports": {
+    ".": "./extension/index.ts",
+    "./workflow": "./workflow/index.ts"
   },
-  "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-ai": "*",
-    "typebox": "*"
+  "pi": {
+    "extensions": ["./extension/index.ts"],
+    "skills": ["./skills"]
   }
 }
 ```
 
-The built-in `general` agent `.md` file ships inside the package (`agents/`
-directory, resolved relative to the extension module) — it is **not** copied
-into `~/.pi/agent/agents`.
+The workflow library is imported by orchestrator-written scripts:
 
-## Installation (as a user would)
-
-```bash
-pi install git:github.com/JosiahEverson/pi-simple-subagents
+```typescript
+import { agent, parallel, pipeline, phase, log, createWorkflowRuntime } from "pi-simple-subagents/workflow";
 ```
 
-This adds the package to `packages` in `~/.pi/agent/settings.json` and clones
-it under `~/.pi/agent/git/github.com/JosiahEverson/pi-simple-subagents`.
-Versioning via git tags (`@v0.1.0` pins a ref).
+These scripts are written to `/tmp`, then executed via Pi's `bash` tool as a child process (e.g. `npx tsx /tmp/workflow-abc.ts`). The workflow library links against the Pi SDK (`@earendil-works/pi-coding-agent`) as a peer dependency.
 
-## Tools
+### 4.2 Public API
 
-Four tools are registered. Descriptions stay terse; catalogs are exposed only
-through `list_subagents` and `get_scoped_models`.
+```typescript
+// workflow/index.ts
 
-### `get_scoped_models`
+export { createWorkflowRuntime } from "./runtime.ts";
+export { agent } from "./agent.ts";
+export { parallel } from "./parallel.ts";
+export { pipeline } from "./pipeline.ts";
+export { phase, log } from "./progress.ts";
 
-Returns exact `provider/model` values allowed for spawn-time overrides. It
-resolves Pi's `enabledModels` patterns; when no usable scope exists, it returns
-all authenticated models.
+export type {
+  WorkflowConfig,
+  WorkflowBudget,
+  AgentOptions,
+  AgentResult,
+  JournalEntry,
+  JournalConfig,
+} from "./types.ts";
+```
 
-Input: `{}`
+### 4.3 `createWorkflowRuntime()`
 
-### `spawn_subagent`
+Entry point that initializes SDK services and returns the primitives bound to a shared runtime context.
 
-Creates a subagent session and sends the initial prompt. Returns when the
-subagent finishes (synchronous).
+```typescript
+// workflow/types.ts
 
-Input:
+export interface WorkflowConfig {
+  /** Working directory for agent sessions. Default: process.cwd() */
+  cwd?: string;
 
-```ts
-{
-  subagent_type?: string,  // optional; falls back to settings.defaultSubagentTypeId
-  prompt: string,
-  model?: string,          // exact value from get_scoped_models
-  thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh"
+  /** Budget constraints. */
+  budget?: Partial<WorkflowBudget>;
+
+  /** Journal configuration for resume support. */
+  journal?: JournalConfig;
+
+  /** Arguments passed from the orchestrator (accessed as `args` in script). */
+  args?: Record<string, unknown>;
+}
+
+export interface WorkflowBudget {
+  /** Max concurrent agent sessions. Default: settings.maxConcurrentSubagents or 4. */
+  maxConcurrentAgents: number;
+
+  /** Max total agents spawned in this run. Default: 100. */
+  maxTotalAgents: number;
+
+  /** Max wall-clock runtime in ms. Default: no limit. */
+  maxRuntime: number;
+
+  /** Max retries per item (for schema validation failures). Default: 2. */
+  maxRetriesPerItem: number;
+
+  /** Max total tokens across all agents. Default: no limit. */
+  maxTotalTokens?: number;
+
+  /** Max total cost in USD. Default: no limit. */
+  maxTotalCost?: number;
+}
+
+export interface AgentOptions {
+  /** System-prompt role text. */
+  role?: string;
+
+  /** Exact model ID (provider/model). */
+  model?: string;
+
+  /** Thinking level. */
+  thinking?: ThinkingLevel;
+
+  /** Tool allowlist. Omit for all. */
+  tools?: string[];
+
+  /** Skill allowlist. Omit for all. */
+  skills?: string[];
+
+  /** Display label. */
+  label?: string;
+
+  /** JSON Schema for structured output. Enables validation + retry. */
+  schema?: object;
+}
+
+export interface AgentResult<T = string> {
+  /** Parsed output (object if schema provided, string otherwise). */
+  output: T;
+
+  /** Usage for this agent call. */
+  usage: UsageSummary;
+
+  /** Agent ID for debugging. */
+  agentId: string;
 }
 ```
 
-Spawn overrides have highest resolution precedence. Prompt metadata tells the
-main agent to set either only at the user's request and to call
-`get_scoped_models` before setting `model`. Values outside the current model
-scope are rejected. Thinking uses Pi's native levels and provider mapping.
+### 4.4 `agent(task, options?)`
 
-Output:
+Spawns a single fresh-context worker. Returns when the worker completes.
 
-```ts
-{
-  subagent_id: string,     // auto-generated, e.g. "general-a1b2c3"
-  response?: string,
-  error?: { code: string, message: string }
+```typescript
+export async function agent<T = string>(
+  task: string,
+  options?: AgentOptions,
+): Promise<AgentResult<T>>;
+```
+
+Behavior:
+
+1. Acquire semaphore slot (respects `budget.maxConcurrentAgents`).
+2. Check `budget.maxTotalAgents` — throw `BudgetExceededError` if reached.
+3. Check journal cache — if hit and input+spec unchanged, return cached result.
+4. Call `resolveSpec()` (shared with extension).
+5. Create an in-memory `AgentSession` via Pi SDK `createAgentSession()`.
+6. Prompt with `buildHarnessPrompt(task, false)`.
+7. Extract final assistant text.
+8. If `options.schema` provided, validate output against JSON Schema:
+   - On validation failure, retry up to `budget.maxRetriesPerItem` times with a correction prompt.
+   - On exhausted retries, throw `SchemaValidationError`.
+9. Record result in journal.
+10. Release semaphore.
+11. Return `AgentResult`.
+
+### 4.5 `parallel(thunks)`
+
+Barrier-style concurrency. All thunks execute concurrently (bounded by semaphore); returns when all complete.
+
+```typescript
+export async function parallel<T>(
+  thunks: Array<() => Promise<T>>,
+): Promise<T[]>;
+```
+
+### 4.6 `pipeline(items, ...stages)`
+
+Streaming/no-barrier. Each item flows through stages independently; item A can enter stage 2 while item B is still in stage 1.
+
+```typescript
+export async function pipeline<T>(
+  items: T[],
+  ...stages: Array<(item: T, index: number) => Promise<T>>
+): Promise<T[]>;
+```
+
+Concurrency is bounded by the shared semaphore. Results are returned in original item order.
+
+### 4.7 `phase(name)` and `log(message)`
+
+Progress to stdout for the orchestrator model to observe.
+
+```typescript
+export function phase(name: string): void;
+export function log(message: string): void;
+```
+
+Output format:
+
+```
+[phase] Discover routes
+[log] Found 47 route files
+[agent:routes-a1b2c3] ✓ 2.3s | ↑12.4k ↓3.1k | $0.004
+[agent:routes-d4e5f6] ✓ 1.8s | ↑10.1k ↓2.8k | $0.003
+```
+
+### 4.8 Budget Types
+
+```typescript
+// workflow/budget.ts
+
+export class BudgetTracker {
+  constructor(budget: WorkflowBudget);
+
+  /** Throws BudgetExceededError if any hard limit is reached. */
+  checkBeforeSpawn(): void;
+
+  /** Record completed agent usage. */
+  recordUsage(usage: UsageSummary): void;
+
+  /** Check runtime limit. */
+  checkRuntime(): void;
+
+  /** Current totals. */
+  get totals(): BudgetTotals;
+}
+
+export interface BudgetTotals {
+  agentsSpawned: number;
+  totalTokens: number;
+  totalCost: number;
+  elapsedMs: number;
+}
+
+export class BudgetExceededError extends Error {
+  constructor(
+    public readonly limit: keyof WorkflowBudget,
+    public readonly current: number,
+    public readonly max: number,
+  );
 }
 ```
 
-- `subagent_type` omitted **and** `defaultSubagentTypeId` unset → `MISSING_SUBAGENT_TYPE`.
-- `subagent_type` set but not found → `UNKNOWN_SUBAGENT_TYPE` (the default is
-  **not** used for unknown types — typos must not silently reroute).
+### 4.9 Journal Types
 
-### `message_subagent`
+```typescript
+// workflow/journal.ts
 
-Sends a follow-up prompt to a previously spawned subagent. Resumes the stored
-session (works even after a hard timeout, and after pi restarts). Returns when
-the subagent finishes responding.
+export interface JournalConfig {
+  /** Directory to persist journal files. Default: cwd/.pi-simple-subagents/journals/ */
+  dir?: string;
 
-Input:
+  /** Enable journal persistence and resume. Default: true. */
+  enabled?: boolean;
+}
 
-```ts
-{
-  subagent_id: string,
-  prompt: string
+export interface JournalEntry {
+  /** Deterministic cache key (see §5 below). */
+  key: string;
+
+  /** Normalized input that produced this entry. */
+  input: JournalInput;
+
+  /** Result, if completed successfully. */
+  result?: AgentResult<unknown>;
+
+  /** Timestamp of completion. */
+  completedAt?: string;
+
+  /** Status. */
+  status: "completed" | "failed" | "running";
+}
+
+export interface JournalInput {
+  task: string;
+  spec: RuntimeSubagentSpec;
+  /** Canonical JSON representation; absent when no schema was requested. */
+  schema?: string;
+}
+
+export class Journal {
+  constructor(config: JournalConfig);
+
+  /** Load journal from disk. */
+  async load(): Promise<void>;
+
+  /** Look up a completed entry by key. Returns undefined on miss or invalidation. */
+  get(key: string): JournalEntry | undefined;
+
+  /** Record a result. Persists to disk. */
+  async record(key: string, input: JournalInput, result: AgentResult<unknown>): Promise<void>;
+
+  /** Invalidate entries whose input no longer matches. */
+  invalidateStale(): number;
 }
 ```
 
-Output:
+### 4.10 JSON Schema Validation
 
-```ts
-{
-  subagent_id: string,     // echoes input for batch correlation
-  response?: string,
-  error?: { code: string, message: string }
+```typescript
+// workflow/schema.ts
+
+export interface ValidationResult {
+  valid: boolean;
+  errors?: string[];
+  parsed?: unknown;
+}
+
+/**
+ * Validate raw agent output text against a JSON Schema.
+ * Attempts JSON.parse, then schema validation.
+ */
+export function validateOutput(raw: string, schema: object): ValidationResult;
+
+/**
+ * Determine whether to retry based on validation result and budget.
+ */
+export function shouldRetry(
+  result: ValidationResult,
+  attempt: number,
+  maxRetries: number,
+): boolean;
+
+/**
+ * Build a correction prompt for schema validation failures.
+ */
+export function buildCorrectionPrompt(errors: string[], schema: object): string;
+```
+
+---
+
+## 5. Journal Key Derivation
+
+The journal key uniquely identifies a unit of work for caching and invalidation. It is a deterministic hash of the **normalized input and spec**:
+
+```typescript
+function deriveJournalKey(input: JournalInput): string {
+  const normalized = JSON.stringify({
+    task: input.task.trim(),
+    systemPrompt: input.spec.systemPrompt,
+    tools: normalizeSelection(input.spec.tools),
+    skills: normalizeSelection(input.spec.skills),
+    modelId: input.spec.modelId,
+    thinking: input.spec.thinking,
+    schema: input.schema ?? null,
+  });
+  return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+}
+
+function normalizeSelection(spec: SelectionSpec): SelectionSpec {
+  if (spec === "all") return "all";
+  return [...spec].sort();
 }
 ```
 
-Unknown id → `UNKNOWN_SUBAGENT_ID`.
+**Cache hit:** key matches AND persisted `input.task` equals current task (exact string equality after trim) AND persisted `input.spec` deep-equals current spec AND persisted canonical `input.schema` equals the current canonical schema representation (including absence).
 
-### `list_subagents`
+**Invalidation:** If any field of the spec or task changes, the key changes, and the old entry is stale. Downstream entries that consumed the stale entry's output are identified by the orchestration script's control flow (the script re-runs; changed upstream outputs naturally cause different downstream inputs).
 
-Returns the catalog of available subagent **types only** (spawned-instance ids
-are already visible in the transcript via prior tool results). Scans agent
-directories **fresh on every call**, so mid-session edits to agent files apply
-immediately.
+---
 
-Input: `{}`
+## 6. Error Taxonomy
 
-Output (as text content): one entry per type with `name`, `description`,
-`source` (`builtin` | `user`), resolved `model`/`thinking`, `tools` (resolved
-from the subagent's filtered namespace, excluding all four tools from this
-extension), `skills`, `context`.
+### Extension Tool Errors
 
-### Error codes
+| Code | Trigger | Has subagent_id? |
+|------|---------|:---:|
+| `MODEL_NOT_SCOPED` | `model` arg not in `get_scoped_models` results | No |
+| `UNKNOWN_SUBAGENT_ID` | `message_subagent` with unregistered ID | Yes |
+| `ABORTED` | User/signal abort during run | Yes |
+| `SUBAGENT_FAILED` | Session creation or prompt execution throws | Yes |
 
-| Code                    | Meaning                                                    |
-|-------------------------|------------------------------------------------------------|
-| `MISSING_SUBAGENT_TYPE` | `subagent_type` omitted and no `defaultSubagentTypeId` set |
-| `UNKNOWN_SUBAGENT_TYPE` | Named type not found                                       |
-| `UNKNOWN_SUBAGENT_ID`   | `message_subagent` id not in the registry                  |
-| `MODEL_NOT_SCOPED`      | Spawn model was not returned by `get_scoped_models`        |
-| `SUBAGENT_FAILED`       | Provider/runtime error inside the subagent run             |
-| `ABORTED`               | User aborted (Esc) while the subagent was running          |
+### Workflow Library Errors
 
-Hard timeout is **not** an error — see Timeouts.
+| Error class | Trigger |
+|-------------|---------|
+| `BudgetExceededError` | Any budget limit reached before spawn |
+| `SchemaValidationError` | Output fails schema validation after all retries |
+| `WorkflowAbortedError` | Runtime budget (maxRuntime) exceeded mid-run |
+| `AgentFailedError` | Underlying session throws during prompt |
 
-## Subagent Types
+All workflow errors include `agentId` (if available), `task` (truncated), and `usage` consumed before failure.
 
-### Discovery & precedence
+---
 
-| Source    | Location                                    |
-|-----------|---------------------------------------------|
-| Built-in  | `agents/*.md` inside the installed package  |
-| User      | `~/.pi/agent/agents/*.md`                   |
+## 7. Resolution Precedence (Complete)
 
-- A user agent with the same `name` as a built-in **overrides** the built-in.
-- **No project-local agents** (`.pi/agents` is not read) — repo-controlled
-  prompts are deliberately out of scope for security.
+### Model ID
 
-### Definition format
+| Priority | Source | Notes |
+|:---:|--------|-------|
+| 1 | `spawn_subagent.model` or `agent(task, {model})` | Must be exact scoped-model ID |
+| 2 | `settings.simpleSubagents.defaultModel` | Must be valid provider/model |
+| 3 | Parent session model ID | Always available |
 
-Markdown files with YAML frontmatter. The body is the subagent's system prompt.
+### Thinking Level
+
+| Priority | Source |
+|:---:|--------|
+| 1 | Spawn arg `thinking` |
+| 2 | `settings.simpleSubagents.defaultThinking` |
+| 3 | Parent session thinking level |
+
+### Tools
+
+| Priority | Source |
+|:---:|--------|
+| 1 | Spawn arg `tools` (explicit array or omitted=all) |
+
+Self-tool exclusion is **always** applied regardless of selection.
+Unknown tool names: warn (via `details.warnings`), omit from active set. Do not fail.
+
+### Skills
+
+| Priority | Source |
+|:---:|--------|
+| 1 | Spawn arg `skills` (explicit array or omitted=all) |
+
+Unknown skill names: warn, omit. Do not fail.
+
+---
+
+## 8. Invariants
+
+1. **No recursive spawning.** Self-tools (`spawn_subagent`, `message_subagent`, `get_scoped_models`) are always excluded from subagent tool surfaces.
+2. **Model must be exact scoped-model ID.** Unqualified names, patterns, and aliases are rejected with `MODEL_NOT_SCOPED`.
+3. **Unknown tools/skills warn, never fail.** The spawn proceeds with the valid subset.
+4. **Every subagent is fresh-context.** No fork machinery exists.
+5. **Registry persists the full resolved spec.** Continuations recreate sessions deterministically from the persisted spec, never re-resolving against current settings.
+6. **Workflow workers are fresh-context only.** No session reuse within a workflow run (journal caching is a separate concern — it caches results, not sessions).
+
+---
+
+## 9. Settings
+
+```typescript
+// extension/settings.ts
+
+export interface SimpleSubagentsSettings {
+  /** Default model ID (provider/model). */
+  defaultModel?: string;
+
+  /** Default thinking level. */
+  defaultThinking?: ThinkingLevel;
+
+  /** Max concurrent subagent sessions (extension tool path). */
+  maxConcurrentSubagents?: number;
+
+  /** Soft timeout in minutes. Default: 30. */
+  softTimeoutMinutes?: number;
+
+  /** Hard timeout in minutes. Default: 45. */
+  hardTimeoutMinutes?: number;
+
+  /** Whether to summarize on hard timeout. Default: false. */
+  summarizeOnTimeout?: boolean;
+
+  /** Model for timeout summaries. Falls back to defaultModel. */
+  timeoutSummaryModel?: string;
+}
+```
+
+---
+
+## 10. Skill Layout
+
+```
+skills/
+└── subagent-workflows/
+    ├── SKILL.md
+    └── references/
+        ├── spawn-spec.md
+        ├── workflow-patterns.md
+        ├── schema-budget-journal.md
+        └── examples.md
+```
+
+### SKILL.md (entry point)
 
 ```markdown
 ---
-name: specialist
-description: Personal subagent for a focused task.
-model: provider/model     # optional
-thinking: medium          # optional
-tools: [read, bash]       # list, comma string, or "all"
-skills: []                # list, comma string, or "all"
-context: fresh            # "fork" | "fresh" (default: fresh)
+name: subagent-workflows
+description: >
+  Spawn subagents and write workflow orchestration scripts for pi-simple-subagents.
+  Use when delegating tasks to subagents, writing multi-agent fan-out scripts,
+  or designing structured agent pipelines.
 ---
-System prompt body…
+
+# Subagent Workflows
+
+## Quick Reference
+
+### Spawn a subagent (via tool)
+
+Use `spawn_subagent` with a complete task description. Optionally provide:
+- `role`: system-prompt instructions for the worker
+- `tools`/`skills`: explicit allowlists (omit for all)
+- `model`/`thinking`: override only when explicitly requested
+- `label`: short identifier for progress display
+
+### Continue a subagent
+
+Use `message_subagent` with the returned `subagent_id`.
+
+### Workflow scripts
+
+For multi-agent orchestration (>3 workers, pipelines, structured output, verification):
+write a TypeScript script to `/tmp` and execute via `bash`.
+
+## When to Use What
+
+| Scenario | Approach |
+|----------|----------|
+| 1-3 independent tasks | Direct `spawn_subagent` calls |
+| Follow-up on prior work | `message_subagent` |
+| Batch processing items | Workflow script with `pipeline()` |
+| Parallel + synthesize | Workflow script with `parallel()` |
+| Structured output needed | Workflow script with `schema` option |
+| Adversarial verification | Workflow script: produce + refute stages |
+
+## Detailed References
+
+Load these as needed:
+
+- [Spawn-spec authoring](references/spawn-spec.md) — task description checklist, role design, tool/skill selection guidance
+- [Workflow patterns](references/workflow-patterns.md) — fan-out+synthesize, classify-and-route, adversarial verification, pipeline stages
+- [Schema/budget/journal](references/schema-budget-journal.md) — JSON Schema for structured output, budget configuration, journal/resume semantics
+- [Worked examples](references/examples.md) — batch TSV review, codebase audit, multi-perspective research
 ```
 
-Frontmatter fields:
+### Package exposure
 
-- **`name`** (required) — the `subagent_type` id.
-- **`description`** (required) — shown by `list_subagents`.
-- **`model`**, **`thinking`** (optional) — see Model & Thinking Resolution.
-- **`tools`** — a **uniform allowlist over the final tool namespace**: built-in
-  tools and extension-registered tools alike (`web_search`, `mcp`, …).
-  `all` (or omitted) = no filter. Unknown names → **warn and continue**
-  (warning surfaced via notify + noted in tool result details); the spawn
-  proceeds without that tool.
-- **`skills`** — same semantics as `tools`, applied to skill names.
-  `all` = every discovered skill.
-- **`context`**:
-  - `fresh` — subagent session starts empty.
-  - `fork` — the main session's **current branch** is forked into the
-    subagent session using `SessionManager.forkFrom()` (or equivalent
-    branch-clone that preserves entry IDs and parent links, so compaction
-    references like `firstKeptEntryId` remain valid). The fork includes all
-    entries up to **but excluding** the assistant message that contains the
-    `spawn_subagent` tool call. The prompt is then delivered into this
-    forked session.
+Per Pi's packages/skills docs, the `skills/` directory is auto-discovered when the package manifest includes it or when using conventional directories. The `package.json` `pi.skills` entry ensures explicit registration:
 
-### System prompt semantics
-
-The agent body **replaces pi's custom system prompt** (equivalent to
-`--system-prompt`). Pi's prompt builder still assembles the surrounding
-sections — available tools, tool guidelines, skills, AGENTS.md context files —
-exactly as pi normally does. Tools and skills declared in frontmatter are
-loaded through pi's standard machinery.
-
-### Extensions inside subagents
-
-Subagent sessions load **all user-scope extensions except simple-subagents
-itself**. After `createAgentSession()`, the extension must call
-`session.bindExtensions(extensionsResult)` to trigger the full extension
-lifecycle (`session_start`, `resources_discover`, etc.) — without this, MCP
-adapters and other lifecycle-dependent extensions will not initialize.
-
-- Rationale: personal agents may depend on extension tools, and safety
-  extensions should also protect subagent runs.
-- Excluding simple-subagents means **no recursion**: subagents cannot spawn
-  subagents. Predictable cost, no timeout pyramids.
-- **Project-local extensions** (`.pi/extensions/`) are **excluded** from
-  subagent sessions — only `~/.pi/agent/extensions/` and package extensions
-  are loaded. This matches the security rationale for excluding project-local
-  agent definitions.
-- Extension hooks (e.g. `tool_result` truncation) remain active even for tools
-  filtered out by the `tools:` allowlist.
-
-### Built-in agent
-
-| Agent     | Purpose                                        | context | tools |
-|-----------|------------------------------------------------|---------|-------|
-| `general` | No instructions beyond the main agent's prompt | fresh   | all   |
-
-Specialized agents are personal configuration and belong in
-`~/.pi/agent/agents/*.md`, not in the package.
-
-## Execution Model
-
-- Each subagent run is an in-process `createAgentSession()` with a persistent
-  session file — a real pi session that can be opened/resumed and **never
-  expires**.
-- Subagent sessions are created with a **synthetic cwd** of
-  `<realCwd>/.pi-simple-subagents`, using the main session's session dir
-  (`ctx.sessionManager.getSessionDir()`). This means:
-  - `SessionManager.list(realCwd)` **excludes** them (no clutter in the
-    project session list or default `/resume` view).
-  - `SessionManager.listAll()` **includes** them (visible when the user
-    presses TAB to browse all sessions).
-  - The session file path is stored **absolutely** in the registry, so
-    lookups via `message_subagent` survive project directory renames.
-- Subagent `cwd` (for tool execution) = main session `cwd` (the real one).
-- `spawn_subagent` / `message_subagent` block until the run completes
-  (synchronous tool calls).
-- The main session's abort signal (`ctx.signal`, i.e. user pressing Esc)
-  aborts in-flight subagent runs → `ABORTED`.
-
-### `response`
-
-The text content of the subagent's **final assistant message** for that run,
-not the full transcript.
-
-### subagent_id & persistence
-
-- Format: `<type>-<shortHash>`, e.g. `general-a1b2c3` (6 hex chars, unique per
-  main session).
-- The `id → session file` mapping is **persisted into the main session** via
-  `pi.appendEntry()` (custom entry type, e.g. `simple-subagents:spawn`).
-- On `session_start` the registry is rebuilt by scanning session entries, so
-  `message_subagent` works after the main session is resumed in a new process.
-  Live `AgentSession` objects are not kept between calls; `message_subagent`
-  reopens the subagent's session file on demand.
-
-## Model & Thinking Resolution
-
-Resolved independently for `model` and `thinking`, highest precedence first:
-
-1. Spawn-time `model` / `thinking` override.
-2. `simpleSubagents.builtinSubagentOverrides[<name>]` — despite the field name
-   (kept per original spec), applies to **any agent by name**, built-in or
-   custom.
-3. Agent frontmatter (`model:` / `thinking:`).
-4. `simpleSubagents.defaultModel` / `simpleSubagents.defaultThinking`.
-5. The main session's current model / thinking level.
-
-## Timeouts
-
-Both clocks are **per tool call** — each `spawn_subagent` **and** each
-`message_subagent` gets fresh clocks. For queued (semaphore-blocked) calls,
-clocks start **when execution starts**, not at call arrival.
-
-### Soft timeout — default 30 min (`softTimeoutMinutes`)
-
-The harness `steer()`s the subagent with a wrap-up instruction, approximately:
-
-> Your time budget is nearly exhausted. Wrap up now. Finish only what is
-> already in flight, then produce your final report. Explicitly tell the main
-> agent what you were unable to finish and what remains to be done.
-
-The run then continues until the subagent finishes or the hard timeout fires.
-
-### Hard timeout — default 45 min (`hardTimeoutMinutes`)
-
-1. The subagent run is aborted. The session file retains everything up to the
-   abort.
-2. If `summarizeOnTimeout` is `true`, a summarization model generates a
-   summary of the subagent session (what was attempted, accomplished,
-   unfinished, and any results produced). Model resolution:
-   `timeoutSummaryModel` → `defaultModel` → the subagent's own resolved
-   model. The summary is returned as `response`, prefixed with a marker:
-
-   ```
-   [hard timeout — session summarized] …
-   ```
-
-   No `error` field — the summary stands **in place of** the subagent's
-   response.
-3. If `summarizeOnTimeout` is `false` (the default), no model call is made.
-   The response is a short static message indicating the timeout, directing
-   the main agent to `message_subagent` if it wants to continue:
-
-   ```
-   [hard timeout — subagent aborted] Use message_subagent to resume.
-   ```
-
-4. The subagent remains **resumable**: `message_subagent` reopens the session
-   with fresh clocks.
-
-## Batching & Concurrency
-
-- Batching = pi's native parallel tool execution: the main agent emits several
-  `spawn_subagent` / `message_subagent` calls in one assistant message and
-  they run concurrently.
-- The extension enforces `maxConcurrentSubagents` (default **4**) with a
-  semaphore. Excess calls **queue** for a slot — they never fail with a
-  concurrency error.
-
-## UI
-
-One-line streaming progress per running subagent via the tool `onUpdate`
-callback, rendered by pi's default renderers (no custom TUI components):
-
-```
-⏳ general-a1b2c3 · 4m12s · bash: npm test
-```
-
-Updated on subagent tool activity and elapsed time. Final result uses default
-tool-result rendering. Usage stats (turns, tokens, cost) are included in the
-tool result `details`.
-
-## Settings Reference
-
-`~/.pi/agent/settings.json`:
-
-```jsonc
-{
-  "simpleSubagents": {
-    "defaultModel": "provider/model",        // fallback model for all subagents
-    "defaultSubagentTypeId": "general",      // used when subagent_type is omitted
-    "defaultThinking": "medium",             // fallback thinking level
-    "builtinSubagentOverrides": {            // per-agent-name overrides (any agent)
-      "general": { "model": "…", "thinking": "…" }
-    },
-    "summarizeOnTimeout": false,             // opt-in; make a model call to summarize on hard timeout
-    "timeoutSummaryModel": "provider/model", // summarizer model (only when summarizeOnTimeout is true)
-    "softTimeoutMinutes": 30,                // default 30
-    "hardTimeoutMinutes": 45,                // default 45
-    "maxConcurrentSubagents": 4              // default 4; semaphore, queued
-  }
+```json
+"pi": {
+  "extensions": ["./extension/index.ts"],
+  "skills": ["./skills"]
 }
 ```
 
-All fields optional.
+---
 
-## Non-Goals
+## 11. Test Plan
 
-- Asynchronous / background subagents (all calls are synchronous).
-- Recursion (subagents spawning subagents).
-- Project-local (`.pi/agents`) agent definitions.
-- Session expiry, cleanup, or garbage collection.
-- Custom TUI renderers, workflow prompt presets, chain modes.
+All tests use `node:test` (built-in, no dependencies). Tests cover pure logic only — no live Pi sessions.
 
-## Implementation Notes (SDK mapping)
+### Test files
 
-- **Session creation:** `createAgentSession({ cwd: realCwd, sessionManager: SessionManager.create(syntheticCwd, sessionDir), … })`
-  where `syntheticCwd` = `<realCwd>/.pi-simple-subagents` and `sessionDir` =
-  `ctx.sessionManager.getSessionDir()`. The `DefaultResourceLoader` is
-  configured with the real cwd, `systemPromptOverride` for the agent body,
-  extension filtering (exclude this package and project-local extensions), and
-  tool/skill activation per frontmatter (`setActiveTools` / skill path
-  filtering). After creation, call
-  `session.bindExtensions(extensionsResult)` to initialize extension
-  lifecycle hooks (MCP adapters, etc.).
-- **`context: fork`:** use `SessionManager.forkFrom()` (or equivalent
-  ID-preserving branch export) to copy the main session's current branch into
-  the subagent session file. The fork point is the last entry **before** the
-  assistant message containing the `spawn_subagent` call, preserving entry IDs
-  and compaction references.
-- **Soft timeout:** `session.steer(text)` at `softTimeoutMinutes`.
-- **Hard timeout:** `session.abort()` at `hardTimeoutMinutes`, then a direct
-  model call over the session transcript for the summary.
-- **Resume:** reopen with `SessionManager.open(sessionFile)` +
-  `createAgentSession` + `session.bindExtensions(extensionsResult)` for
-  `message_subagent`.
-- **Registry persistence:** `pi.appendEntry("simple-subagents:spawn", { id, type, sessionFile })`;
-  rebuild on `session_start` from `ctx.sessionManager.getEntries()`.
-- **Abort propagation:** wire the tool `signal` (and `ctx.signal`) to abort
-  the subagent session run.
-- **Semaphore:** module-level async semaphore sized from settings, acquired
-  around each run; timeout clocks start after acquisition.
+| File | Covers |
+|------|--------|
+| `test/spec.test.ts` | `resolveSpec()`: model precedence, thinking precedence, label derivation, system-prompt construction, tools/skills normalization, edge cases (empty role, all-whitespace label, undefined model) |
+| `test/journal.test.ts` | `deriveJournalKey()`: determinism, ordering independence for tools/skills arrays, task trim normalization; `Journal.get()`: cache hit on matching input, cache miss on changed task, cache miss on changed spec field |
+| `test/schema.test.ts` | `validateOutput()`: valid JSON + valid schema → pass; invalid JSON → fail with parse error; valid JSON + schema violation → fail with paths; `shouldRetry()`: returns true below max, false at max; `buildCorrectionPrompt()`: includes error details |
+| `test/budget.test.ts` | `BudgetTracker`: throws on spawn when maxTotalAgents reached; throws when maxTotalTokens exceeded; accumulates correctly across multiple `recordUsage` calls; `checkRuntime()` throws when elapsed > maxRuntime |
+
+### npm test
+
+```json
+"scripts": {
+  "typecheck": "tsc --noEmit",
+  "unittest": "node --test test/*.test.ts",
+  "test": "npm run typecheck && npm run unittest"
+}
+```
+
+Node 22.19+ supports `--test` with TypeScript (via `--experimental-strip-types` or tsx). Use `--import tsx` if strip-types is insufficient for the TypeScript features used.
+
+---
+
+## 12. Staged Implementation Plan
+
+### Stage 1: Core Refactor (Extension)
+
+**Goal:** Extension compiles and functions with the new tool surface, spec resolution, registry, and plain-text output. No workflow library yet.
+
+**Boundary:** `npm run typecheck` passes. Extension is manually testable in Pi.
+
+**Tasks:**
+
+1. Create `shared/types.ts`, `shared/spec.ts`, `shared/tools.ts`, `shared/models.ts`.
+2. Implement `resolveSpec()`, `buildSystemPrompt()`, `buildHarnessPrompt()`, label derivation.
+3. Implement tool/skill filtering in `shared/tools.ts` (extract from `run.ts`).
+4. Rewrite `extension/registry.ts`: record type, persist full spec.
+5. Rewrite `extension/settings.ts`: remove deleted settings, simplify.
+6. Rewrite `extension/run.ts`:
+   - Remove all persona/agents.ts imports and logic.
+   - `executeSpawnSubagent`: accept new params schema, call `resolveSpec()`, pass to `createConfiguredSession()`.
+   - `executeMessageSubagent`: load spec from registry record, pass directly to session creation.
+   - `createConfiguredSession`: accept `RuntimeSubagentSpec` instead of `AgentDefinition`.
+   - Output: plain text with id header instead of JSON.stringify.
+7. Rewrite `extension/index.ts`:
+   - Remove `list_subagents` tool registration.
+   - Update `spawn_subagent` schema (new params).
+   - Update TUI rendering for plain-text output parsing.
+   - Remove persona discovery imports.
+8. Delete `extension/agents.ts` and `agents/` directory.
+9. Update `tsconfig.json` include paths.
+10. Verify `npm run typecheck` passes.
+
+### Stage 2: Workflow Library + Tests
+
+**Goal:** Workflow library compiles, exports public API, and all unit tests pass.
+
+**Boundary:** `npm test` passes (typecheck + unit tests).
+
+**Tasks:**
+
+1. Create `workflow/types.ts` with all public type definitions.
+2. Implement `workflow/budget.ts` — `BudgetTracker` class.
+3. Implement `workflow/journal.ts` — `Journal` class, `deriveJournalKey()`.
+4. Implement `workflow/schema.ts` — `validateOutput()`, `shouldRetry()`, `buildCorrectionPrompt()`.
+5. Implement `workflow/semaphore.ts` (re-export or shared instance).
+6. Implement `workflow/agent.ts` — `agent()` function using Pi SDK.
+7. Implement `workflow/parallel.ts` — `parallel()` barrier primitive.
+8. Implement `workflow/pipeline.ts` — `pipeline()` streaming primitive.
+9. Implement `workflow/progress.ts` — `phase()`, `log()`.
+10. Implement `workflow/index.ts` — create runtime, export public API.
+11. Add `exports` field to `package.json`.
+12. Write all test files (`test/spec.test.ts`, `test/journal.test.ts`, `test/schema.test.ts`, `test/budget.test.ts`).
+13. Add test script to `package.json`.
+14. Verify `npm test` passes.
+
+### Stage 3: Skill + Docs
+
+**Goal:** Packaged skill is discoverable by Pi, README is accurate, package is publishable.
+
+**Boundary:** `pi` loads the skill on startup (visible in skill list). README documents the full surface.
+
+**Tasks:**
+
+1. Create `skills/subagent-workflows/SKILL.md`.
+2. Create `skills/subagent-workflows/references/spawn-spec.md` — task-spec checklist (Anthropic's 9-point list from researcher brief §8), role design patterns, tool/skill selection heuristics.
+3. Create `skills/subagent-workflows/references/workflow-patterns.md` — fan-out+synthesize, adversarial verification, classify-and-route, pipeline stages, model routing.
+4. Create `skills/subagent-workflows/references/schema-budget-journal.md` — schema authoring, budget tuning, journal behavior, resume semantics.
+5. Create `skills/subagent-workflows/references/examples.md` — worked examples including batch-review-of-TSV-rows.
+6. Update `package.json` `pi.skills` and `files` entries.
+7. Rewrite `README.md` (installation, tool reference, settings, workflow usage).
+8. Final verification: install package in Pi, confirm skill appears, confirm tools work.
+
+---
+
+## 13. Open Design Notes
+
+### Per-ID concurrency on `message_subagent`
+
+The full spec is persisted so the session file is the only contention point. Pi's `SessionManager.open()` behavior under concurrent writes is the remaining risk. Recommendation: document that parallel messages to the same ID are unsupported (undefined behavior). If needed later, add a per-ID mutex in the registry.
+
+### Extension self-exclusion in workflow library
+
+Workflow scripts run in a child process and create sessions via the SDK directly. They do not load Pi extensions at all (using `DefaultResourceLoader` without additional extension paths, or a minimal resource loader). The self-tool exclusion is handled by the workflow library simply never registering subagent tools on worker sessions.
+
+### Workflow script execution environment
+
+Scripts are TypeScript files executed via `npx tsx /tmp/workflow-xxx.ts` (or `node --import tsx`). They import from `pi-simple-subagents/workflow` which resolves via the installed package. The workflow library initializes its own `ModelRuntime` and `SettingsManager` instances to create sessions. The orchestrator model must ensure the package is importable (it is installed as a Pi package, so its path is known).
+
+### Token/cost budget accuracy
+
+Pi's `UsageSummary` on `AssistantMessage` provides per-turn token counts and cost. The workflow library accumulates these across all agents. Accuracy depends on the model provider reporting usage correctly. The budget is best-effort; a single agent turn may exceed the remaining budget before the check fires.

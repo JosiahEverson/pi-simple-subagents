@@ -1,91 +1,83 @@
 # pi-simple-subagents
 
-Lightweight synchronous subagents for Pi.
+Inline-defined subagents and workflow orchestration for [Pi](https://github.com/earendil-works/pi-coding-agent).
 
-This package adds four tools:
-
-- `list_subagents` shows available subagent types.
-- `get_scoped_models` lists allowed model overrides from Pi's `enabledModels` scope.
-- `spawn_subagent` starts a persistent Pi session with optional `model` and `thinking` overrides.
-- `message_subagent` sends a follow-up prompt to a spawned subagent.
+There are no prebuilt agent roles. Every subagent is defined at spawn time by the orchestrating agent: a task, and optionally a role, model, thinking level, and tool/skill allowlists. For large batches, the orchestrator writes a workflow script that fans out workers and returns one consolidated result.
 
 ## Install
 
-```bash
-pi install git:github.com/JosiahEverson/pi-simple-subagents
+Add the package to `~/.pi/agent/settings.json`:
+
+```json
+{ "packages": ["pi-simple-subagents"] }
 ```
 
-For local development:
+## Tools
 
-```bash
-pi install /path/to/pi-simple-subagents
+### `spawn_subagent`
+
+Runs a fresh-context subagent synchronously and returns its final reply.
+
+| Param | | |
+|---|---|---|
+| `task` | required | Objective, scope, boundaries, expected output |
+| `role` | optional | System-prompt instructions for the worker |
+| `model` | optional | Exact ID from `get_scoped_models` |
+| `thinking` | optional | `off`–`max` |
+| `tools` / `skills` | optional | Allowlists; omit for all, `[]` for none |
+| `label` | optional | Short display name |
+
+Output is plain text: a `subagent_id: <id>` header line followed by the worker's reply. The extension's own tools are always excluded from workers — no recursive spawning.
+
+### `message_subagent`
+
+Continues a spawned subagent by `subagent_id`. The full resolved spec (role, model, thinking, tools, skills) is persisted at spawn time, so follow-ups recreate the session deterministically.
+
+### `get_scoped_models`
+
+Lists exact model IDs permitted by Pi's `enabledModels`.
+
+## Workflow library
+
+`pi-simple-subagents/workflow` is a programmatic orchestration layer for scripts run outside the Pi process:
+
+```ts
+import { createWorkflowRuntime } from "pi-simple-subagents/workflow";
+
+const wf = await createWorkflowRuntime({ budget: { maxTotalAgents: 30 } });
+const audits = await wf.pipeline(files, async (file) => ({
+  file,
+  finding: (await wf.agent(`Audit ${file} for missing auth checks.`, { tools: ["read", "grep"] })).output,
+}));
+console.log(audits.filter((a) => a.finding !== "NONE"));
 ```
 
-After installing or editing the package, run `/reload` in Pi.
+- `agent(task, options)` — one fresh worker; options match `spawn_subagent`, plus `schema` for JSON-Schema-validated structured output with correction retries.
+- `parallel(thunks)` — barrier concurrency.
+- `pipeline(items, ...stages)` — streaming stages, no barrier.
+- Budgets — `maxConcurrentAgents`, `maxTotalAgents`, `maxRuntime`, `maxRetriesPerItem`, `maxTotalTokens`, `maxTotalCost`.
+- Journal — completed calls are cached on disk keyed by task + spec; unchanged calls are served from cache on rerun.
 
-## Agent Definitions
-
-The package ships only the minimal `general` agent in its `agents/` directory.
-Add personal agents in `~/.pi/agent/agents/*.md`. A personal agent with the same
-`name` as a built-in overrides it.
-
-Project-local `.pi/agents` files are deliberately ignored.
-
-Example:
-
-```markdown
----
-name: specialist
-description: Personal subagent for a focused task.
-model: provider/model
-thinking: medium
-tools: [read, bash]
-skills: []
-context: fresh
----
-System prompt body...
-```
-
-`tools` and `skills` accept a YAML list, a comma-separated string, or `all`.
-Omitting `tools` or `skills` means `all`.
-
-## Spawn Overrides
-
-Only pass `spawn_subagent.model` or `spawn_subagent.thinking` when the user
-requests an override. Before overriding `model`, call `get_scoped_models` and
-use an exact returned `provider/model` value. The tool resolves Pi's
-`enabledModels`; when unset or empty, it returns all authenticated models.
-
-`thinking` uses Pi's native levels: `off`, `minimal`, `low`, `medium`, `high`,
-or `xhigh`. Pi maps these to provider-specific effort/reasoning controls.
+The packaged `subagent-workflows` skill teaches the orchestrating model both surfaces.
 
 ## Settings
 
-All settings are optional under `simpleSubagents` in `~/.pi/agent/settings.json`:
+Under `simpleSubagents` in Pi settings:
 
-```jsonc
-{
-  "simpleSubagents": {
-    "defaultModel": "provider/model",
-    "defaultSubagentTypeId": "general",
-    "defaultThinking": "medium",
-    "builtinSubagentOverrides": {
-      "general": { "model": "provider/model", "thinking": "medium" }
-    },
-    "summarizeOnTimeout": false,
-    "timeoutSummaryModel": "provider/model",
-    "softTimeoutMinutes": 30,
-    "hardTimeoutMinutes": 45,
-    "maxConcurrentSubagents": 4
-  }
-}
+| Key | Default | |
+|---|---|---|
+| `defaultModel` | parent model | `provider/model` |
+| `defaultThinking` | parent level | |
+| `maxConcurrentSubagents` | 4 | Also the default workflow concurrency |
+| `softTimeoutMinutes` | 30 | Worker asked to wrap up |
+| `hardTimeoutMinutes` | 45 | Worker aborted |
+| `summarizeOnTimeout` | false | Summarize aborted runs |
+| `timeoutSummaryModel` | `defaultModel` | |
+
+## Development
+
+```sh
+npm test   # typecheck + node:test unit tests
 ```
 
-## Notes
-
-Subagent sessions are real Pi sessions and remain resumable. They use a
-synthetic cwd below the current project so they do not clutter the default
-project session list, but they are visible in the all-sessions view.
-
-Personal agent definitions can select tools supplied by other installed
-extensions.
+License: 0BSD

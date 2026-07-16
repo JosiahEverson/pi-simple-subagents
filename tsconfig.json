@@ -12,7 +12,10 @@
     ]
   },
   "include": [
-    "extension/**/*.ts"
+    "extension/**/*.ts",
+    "shared/**/*.ts",
+    "workflow/**/*.ts",
+    "test/**/*.ts"
   ],
   "exclude": [
     "node_modules"

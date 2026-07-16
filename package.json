@@ -10,15 +10,21 @@
   "pi": {
     "extensions": [
       "./extension/index.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "npm run typecheck"
+    "unittest": "node --experimental-transform-types --test test/*.test.ts",
+    "test": "npm run typecheck && npm run unittest"
   },
   "files": [
-    "agents/",
     "extension/",
+    "shared/",
+    "workflow/",
+    "skills/",
     "README.md",
     "LICENSE",
     "package.json"
@@ -44,13 +50,17 @@
     }
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.80.5",
-    "@earendil-works/pi-coding-agent": "^0.80.5",
-    "@earendil-works/pi-tui": "^0.80.5",
+    "@earendil-works/pi-ai": "^0.80.9",
+    "@earendil-works/pi-coding-agent": "^0.80.9",
+    "@earendil-works/pi-tui": "^0.80.9",
     "@types/node": "^24.12.4",
     "typescript": "^5.9.3"
   },
   "engines": {
     "node": ">=22.19.0"
+  },
+  "exports": {
+    ".": "./extension/index.ts",
+    "./workflow": "./workflow/index.ts"
   }
 }

@@ -1,12 +1,19 @@
 import { fileURLToPath } from "node:url";
-import { Markdown, Text, Container, Spacer } from "@earendil-works/pi-tui";
+import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { getAgentDir, getMarkdownTheme, keyHint, type AgentToolResult, type ExtensionAPI, type Theme, type ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
-import { discoverAgents, type AgentContextMode } from "./agents.ts";
+import {
+  getMarkdownTheme,
+  keyHint,
+  type AgentToolResult,
+  type ExtensionAPI,
+  type Theme,
+  type ToolRenderResultOptions,
+} from "@earendil-works/pi-coding-agent";
+import { deriveLabel } from "../shared/spec.ts";
+import type { ThinkingLevel } from "../shared/types.ts";
 import { SubagentRegistry } from "./registry.ts";
 import {
   executeGetScopedModels,
-  executeListSubagents,
   executeMessageSubagent,
   executeSpawnSubagent,
   type SubagentToolDetails,
@@ -16,15 +23,18 @@ import { installStaleCtxGuard } from "./stale-ctx-guard.ts";
 
 const SELF_EXTENSION_PATH = fileURLToPath(import.meta.url);
 const COLLAPSED_RESPONSE_LINES = 16;
-const SUBAGENT_TYPE_DESCRIPTION = "Exact id from list_subagents.";
 
-interface SubagentResponsePayload {
-  subagent_id?: string;
-  response?: string;
-  error?: {
-    code?: string;
-    message?: string;
-  };
+interface SpawnDisplayConfig {
+  model: string;
+  thinking: ThinkingLevel;
+  modelOverridden: boolean;
+  thinkingOverridden: boolean;
+}
+
+interface ParsedSubagentOutput {
+  id?: string;
+  response: string;
+  error?: { code: string; message: string };
 }
 
 function formatTokenCount(n: number): string {
@@ -44,30 +54,26 @@ function formatUsageLine(details: SubagentToolDetails | undefined, theme: Theme)
 
 function renderSubagentCall(
   verb: "spawn" | "message",
-  typeOrId: string | undefined,
-  prompt: string | undefined,
-  contextMode: AgentContextMode | undefined,
+  labelOrId: string | undefined,
+  task: string | undefined,
   theme: Theme,
+  spawnConfig?: SpawnDisplayConfig,
 ): Container {
-  const subject = typeOrId?.trim() || "default";
-  const contextLabel = contextMode ? ` ${theme.fg("dim", `context: ${contextMode === "fork" ? "forked" : "fresh"}`)}` : "";
+  const subject = labelOrId?.trim() || "subagent";
   const container = new Container();
-  container.addChild(
-    new Text(
-      `${theme.fg("toolTitle", theme.bold(verb))} ${theme.fg("accent", subject)} ${theme.fg("toolTitle", "subagent")}${contextLabel}`,
-      0,
-      0,
-    ),
-  );
-  if (prompt) {
-    const blockquote = prompt.split("\n").map((line) => `> ${line}`).join("\n");
+  container.addChild(new Text(
+    `${theme.fg("toolTitle", theme.bold(verb))} ${theme.fg("accent", subject)} ${theme.fg("toolTitle", "subagent")}`,
+    0,
+    0,
+  ));
+  if (spawnConfig) container.addChild(new Text(formatSpawnConfig(spawnConfig, theme), 0, 0));
+  if (task) {
+    const blockquote = task.split("\n").map((line) => `> ${line}`).join("\n");
     container.addChild(new Spacer(1));
     container.addChild(new Text(theme.fg("customMessageLabel", theme.bold("prompt to subagent")), 0, 0));
-    container.addChild(
-      new Markdown(blockquote, 0, 0, getMarkdownTheme(), {
-        color: (value: string) => theme.fg("dim", value),
-      }),
-    );
+    container.addChild(new Markdown(blockquote, 0, 0, getMarkdownTheme(), {
+      color: (value: string) => theme.fg("dim", value),
+    }));
   }
   return container;
 }
@@ -89,25 +95,19 @@ function renderSubagentResult(
     return new Text(usagePart ? `${progress}\n${usagePart}` : progress, 0, 0);
   }
 
-  const payload = parseSubagentPayload(text);
-  if (payload?.error) {
-    return new Text(
-      theme.fg("error", `${payload.error.code ?? "ERROR"}: ${payload.error.message ?? "Subagent failed."}`),
-      0,
-      0,
-    );
+  const parsed = parseSubagentOutput(text);
+  if (parsed.error) {
+    return new Text(theme.fg("error", `${parsed.error.code}: ${parsed.error.message}`), 0, 0);
   }
 
-  const response = payload?.response ?? text;
+  const response = parsed.response;
   const display = options.expanded ? response : collapseMarkdown(response, COLLAPSED_RESPONSE_LINES);
   const container = new Container();
   container.addChild(new Spacer(1));
-  container.addChild(new Text(theme.fg("toolTitle", theme.bold("subagent response")), 0, 0));
-  container.addChild(
-    new Markdown(display || theme.fg("muted", "No response."), 0, 0, getMarkdownTheme(), {
-      color: (value: string) => theme.fg("toolOutput", value),
-    }),
-  );
+  container.addChild(new Text(theme.fg("customMessageLabel", theme.bold("subagent response")), 0, 0));
+  container.addChild(new Markdown(display || theme.fg("muted", "No response."), 1, 0, getMarkdownTheme(), {
+    color: (value: string) => theme.fg("toolOutput", value),
+  }));
 
   const hint = !options.expanded
     ? response !== display
@@ -115,53 +115,63 @@ function renderSubagentResult(
       : `\n(${keyHint("app.tools.expand", "to expand")})`
     : `\n(${keyHint("app.tools.expand", "to collapse")})`;
   const usagePart = formatUsageLine(details, theme);
-  const footer = usagePart ? `${hint}  ${usagePart}` : hint;
-  container.addChild(new Text(theme.fg("muted", footer), 0, 0));
-
+  container.addChild(new Text(theme.fg("muted", usagePart ? `${hint}  ${usagePart}` : hint), 0, 0));
   return container;
 }
 
-function parseSubagentPayload(text: string): SubagentResponsePayload | undefined {
-  try {
-    const parsed = JSON.parse(text) as unknown;
-    if (!parsed || typeof parsed !== "object") return undefined;
-    return parsed as SubagentResponsePayload;
-  } catch {
-    return undefined;
-  }
+function parseSubagentOutput(text: string): ParsedSubagentOutput {
+  const lines = text.split("\n");
+  const idMatch = /^subagent_id:\s*(.+)$/.exec(lines[0] ?? "");
+  const response = idMatch ? lines.slice(1).join("\n") : text;
+  const errorMatch = /^ERROR \[([^\]]+)\]:\s*(.*)$/s.exec(response);
+  return {
+    id: idMatch?.[1],
+    response,
+    error: errorMatch ? { code: errorMatch[1], message: errorMatch[2] } : undefined,
+  };
 }
 
 function collapseMarkdown(markdown: string, maxLines: number): string {
   const lines = markdown.trimEnd().split("\n");
-  if (lines.length <= maxLines) return markdown;
-  return lines.slice(0, maxLines).join("\n");
+  return lines.length <= maxLines ? markdown : lines.slice(0, maxLines).join("\n");
 }
 
-function getAgentContext(type: string | undefined): AgentContextMode | undefined {
-  if (!type) return undefined;
-  return discoverAgents(getAgentDir()).agents.find((agent) => agent.name === type)?.context;
+function formatSpawnConfig(config: SpawnDisplayConfig, theme: Theme): string {
+  const modelColor = config.modelOverridden ? "error" : "muted";
+  const thinkingColor = config.thinkingOverridden ? "error" : "muted";
+  return `${theme.fg(modelColor, config.model)}${theme.fg("muted", ":")}${theme.fg(thinkingColor, config.thinking)}`;
+}
+
+function resolveSpawnDisplay(
+  requestedModel: string | undefined,
+  requestedThinking: ThinkingLevel | undefined,
+  mainModel: string | undefined,
+  mainThinking: ThinkingLevel,
+): SpawnDisplayConfig {
+  const settings = loadSettings();
+  return {
+    model: requestedModel ?? settings.defaultModel ?? mainModel ?? "unknown",
+    thinking: requestedThinking ?? settings.defaultThinking ?? mainThinking,
+    modelOverridden: requestedModel !== undefined,
+    thinkingOverridden: requestedThinking !== undefined,
+  };
+}
+
+function formatModel(model: { provider: string; id: string } | undefined): string | undefined {
+  return model ? `${model.provider}/${model.id}` : undefined;
 }
 
 export default function simpleSubagents(pi: ExtensionAPI) {
-  // Protect the whole process from ANY extension (local or 3rd party) that
-  // touches a stale ctx from a timer/detached promise after session
-  // replacement, reload, or subagent-session disposal.
   installStaleCtxGuard();
-
   const registry = new SubagentRegistry();
+  let mainModel: string | undefined;
 
   pi.on("session_start", (_event, ctx) => {
     registry.rebuild(ctx.sessionManager.getEntries());
+    mainModel = formatModel(ctx.model);
   });
-
-  pi.registerTool({
-    name: "list_subagents",
-    label: "List Subagents",
-    description: "List subagent types.",
-    promptSnippet: "List subagent types before choosing one.",
-    parameters: Type.Object({}),
-    execute: (_toolCallId, _params, _signal, _onUpdate, ctx) =>
-      executeListSubagents(pi, ctx),
+  pi.on("model_select", (event) => {
+    mainModel = formatModel(event.model);
   });
 
   pi.registerTool({
@@ -170,52 +180,53 @@ export default function simpleSubagents(pi: ExtensionAPI) {
     description: "List allowed model overrides from Pi's enabledModels.",
     promptSnippet: "List allowed model overrides.",
     parameters: Type.Object({}),
-    execute: (_toolCallId, _params, _signal, _onUpdate, ctx) =>
-      executeGetScopedModels(ctx),
+    execute: (_toolCallId, _params, _signal, _onUpdate, ctx) => executeGetScopedModels(ctx),
   });
 
   pi.registerTool({
     name: "spawn_subagent",
     label: "Spawn Subagent",
-    description: "Spawn a subagent; override model/thinking only if asked; model requires get_scoped_models.",
+    description: "Spawn a fresh-context subagent defined inline: a task plus optional role, model, thinking, tools, and skills.",
     promptSnippet: "Spawn a subagent.",
     promptGuidelines: [
-      "Before spawn_subagent, call list_subagents unless the user or this conversation already supplied the exact type id.",
-      "Set model or thinking only at the user's request; always call get_scoped_models before model and use an exact result.",
+      "Route model and thinking deliberately per task: match capability to the work, and scale thinking with the judgment required.",
+      "Model overrides must be exact IDs returned by get_scoped_models; call it before your first override.",
+      "Give each subagent a complete task: objective, scope, boundaries, and the exact output you expect back.",
     ],
     parameters: Type.Object({
-      subagent_type: Type.Optional(Type.String({ description: SUBAGENT_TYPE_DESCRIPTION })),
-      prompt: Type.String(),
-      model: Type.Optional(Type.String({ description: "Exact get_scoped_models result; user-requested only." })),
-      thinking: Type.Optional(
-        Type.Union(
-          [
-            Type.Literal("off"),
-            Type.Literal("minimal"),
-            Type.Literal("low"),
-            Type.Literal("medium"),
-            Type.Literal("high"),
-            Type.Literal("xhigh"),
-          ],
-          { description: "User-requested Pi thinking level." },
-        ),
-      ),
+      task: Type.String({ description: "Complete task: objective, scope, boundaries, and expected output." }),
+      role: Type.Optional(Type.String({ description: "System-prompt instructions defining who the subagent is and how it should work. Omit for a generic worker." })),
+      model: Type.Optional(Type.String({ description: "Exact model ID from get_scoped_models. Route by task fit; omit to inherit the default." })),
+      thinking: Type.Optional(Type.Union([
+        Type.Literal("off"),
+        Type.Literal("minimal"),
+        Type.Literal("low"),
+        Type.Literal("medium"),
+        Type.Literal("high"),
+        Type.Literal("xhigh"),
+        Type.Literal("max"),
+      ], { description: "Thinking level. Scale with judgment required: low for mechanical work, high for design or review." })),
+      tools: Type.Optional(Type.Array(Type.String(), { description: "Tool-name allowlist. Omit for all tools; [] for none." })),
+      skills: Type.Optional(Type.Array(Type.String(), { description: "Skill-name allowlist. Omit for all skills; [] for none." })),
+      label: Type.Optional(Type.String({ description: "Short label used in progress display and the subagent_id." })),
     }),
     executionMode: "parallel",
-    execute: (_toolCallId, params, signal, onUpdate, ctx) =>
-      executeSpawnSubagent(
-        pi,
-        registry,
-        params,
-        signal,
-        onUpdate,
-        ctx,
-        SELF_EXTENSION_PATH,
-      ),
-    renderCall: (args, theme) => {
-      const type = args.subagent_type ?? loadSettings().defaultSubagentTypeId;
-      return renderSubagentCall("spawn", type, args.prompt, getAgentContext(type), theme);
-    },
+    execute: (_toolCallId, params, signal, onUpdate, ctx) => executeSpawnSubagent(
+      pi,
+      registry,
+      params,
+      signal,
+      onUpdate,
+      ctx,
+      SELF_EXTENSION_PATH,
+    ),
+    renderCall: (args, theme) => renderSubagentCall(
+      "spawn",
+      deriveLabel(args),
+      args.task,
+      theme,
+      resolveSpawnDisplay(args.model, args.thinking, mainModel, pi.getThinkingLevel()),
+    ),
     renderResult: (result, options, theme) => renderSubagentResult(result, options, theme),
   });
 
@@ -225,21 +236,19 @@ export default function simpleSubagents(pi: ExtensionAPI) {
     description: "Continue a spawned subagent by id.",
     promptSnippet: "Continue a spawned subagent by id.",
     parameters: Type.Object({
-      subagent_id: Type.String(),
-      prompt: Type.String(),
+      subagent_id: Type.String({ description: "ID returned by spawn_subagent." }),
+      prompt: Type.String({ description: "Follow-up task or question. The subagent keeps its prior conversation and configuration." }),
     }),
     executionMode: "parallel",
-    execute: (_toolCallId, params, signal, onUpdate, ctx) =>
-      executeMessageSubagent(
-        pi,
-        registry,
-        params,
-        signal,
-        onUpdate,
-        ctx,
-        SELF_EXTENSION_PATH,
-      ),
-    renderCall: (args, theme) => renderSubagentCall("message", args.subagent_id, args.prompt, getAgentContext(registry.get(args.subagent_id)?.type), theme),
+    execute: (_toolCallId, params, signal, onUpdate, ctx) => executeMessageSubagent(
+      registry,
+      params,
+      signal,
+      onUpdate,
+      ctx,
+      SELF_EXTENSION_PATH,
+    ),
+    renderCall: (args, theme) => renderSubagentCall("message", args.subagent_id, args.prompt, theme),
     renderResult: (result, options, theme) => renderSubagentResult(result, options, theme),
   });
 }

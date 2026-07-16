@@ -1,11 +1,10 @@
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
-  buildSessionContext,
   createAgentSession,
   DefaultResourceLoader,
   getAgentDir,
-  resolveModelScopeWithDiagnostics,
+  ModelRuntime,
   SessionManager,
   SettingsManager,
   type AgentToolResult,
@@ -13,45 +12,34 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
   type LoadExtensionsResult,
-  type ModelRegistry,
-  type ToolInfo,
 } from "@earendil-works/pi-coding-agent";
 import {
   completeSimple,
-  type AssistantMessage,
   type ImageContent,
-  type Message,
   type Model,
   type TextContent,
 } from "@earendil-works/pi-ai/compat";
 import {
-  discoverAgents,
-  type AgentDefinition,
-  type SelectionSpec,
-  type ThinkingLevel,
-} from "./agents.ts";
+  extractAssistantText,
+  getFinalAssistantText,
+  isAssistantMessage,
+  summarizeUsage,
+  type UsageSummary,
+} from "../shared/messages.ts";
+import { findModelById, formatModelId, isScopedModelId, resolveScopedModels } from "../shared/models.ts";
+import {
+  buildHarnessPrompt,
+  resolveSpec,
+  type RuntimeSubagentSpec,
+  type SpawnInput,
+} from "../shared/spec.ts";
+import { filterSkillSelection, filterToolSelection } from "../shared/tools.ts";
+import type { ThinkingLevel } from "../shared/types.ts";
 import type { RegistryRecord, SubagentRegistry } from "./registry.ts";
 import { Semaphore } from "./semaphore.ts";
-import {
-  loadSettings,
-  positiveNumber,
-  type SimpleSubagentsSettings,
-} from "./settings.ts";
+import { loadSettings, positiveNumber, type SimpleSubagentsSettings } from "./settings.ts";
 
-const TOOL_NAMES = {
-  spawn: "spawn_subagent",
-  message: "message_subagent",
-  list: "list_subagents",
-  models: "get_scoped_models",
-} as const;
-
-const SELF_TOOL_NAMES = new Set<string>(Object.values(TOOL_NAMES));
-const SUBAGENT_EXTENSION_EXCLUDE_PATH_PARTS = [
-  // This session-management extension schedules idle polling with a
-  // session-bound ctx; subagent sessions are transient in-process sessions, so
-  // disposing them can otherwise trip pi's stale-context guard.
-  "/pi-session-naming/",
-] as const;
+const SUBAGENT_EXTENSION_EXCLUDE_PATH_PARTS = ["/pi-session-naming/"] as const;
 const DEFAULT_SOFT_TIMEOUT_MINUTES = 30;
 const DEFAULT_HARD_TIMEOUT_MINUTES = 45;
 const DEFAULT_MAX_CONCURRENT_SUBAGENTS = 4;
@@ -60,45 +48,14 @@ const TIMEOUT_SUMMARY_PREFIX = "[hard timeout - session summarized]";
 const SOFT_TIMEOUT_PROMPT =
   "Your time budget is nearly exhausted. Wrap up now. Finish only what is already in flight, then produce your final report. Explicitly tell the main agent what you were unable to finish and what remains to be done.";
 
-interface ResolvedRunConfig {
-  model: Model<any> | undefined;
-  modelLabel: string | undefined;
-  thinking: ThinkingLevel;
-  warnings: string[];
-}
-
 export interface SubagentToolDetails {
   subagent_id?: string;
-  subagent_type?: string;
   sessionFile?: string;
   elapsedMs?: number;
   model?: string;
   thinking?: ThinkingLevel;
   usage?: UsageSummary;
   warnings?: string[];
-}
-
-interface UsageSummary {
-  assistantTurns: number;
-  input: number;
-  output: number;
-  cacheRead: number;
-  cacheWrite: number;
-  totalTokens: number;
-  cost: {
-    input: number;
-    output: number;
-    cacheRead: number;
-    cacheWrite: number;
-    total: number;
-  };
-}
-
-interface SpawnParams {
-  subagent_type?: string;
-  prompt: string;
-  model?: string;
-  thinking?: ThinkingLevel;
 }
 
 interface MessageParams {
@@ -111,147 +68,101 @@ let semaphore: Semaphore | undefined;
 export async function executeGetScopedModels(
   ctx: ExtensionContext,
 ): Promise<AgentToolResult<SubagentToolDetails>> {
-  const scoped = await getScopedModelOptions(ctx);
-  return {
-    content: [
-      {
+  try {
+    const scoped = await getScopedModelOptions(ctx);
+    return {
+      content: [{
         type: "text",
         text: scoped.options.map((option) => option.id).join("\n") || "No scoped models available.",
-      },
-    ],
-    details: { warnings: scoped.warnings },
-  };
-}
-
-export async function executeListSubagents(
-  pi: Pick<ExtensionAPI, "getAllTools" | "getCommands" | "getThinkingLevel">,
-  ctx: ExtensionContext,
-): Promise<AgentToolResult<SubagentToolDetails>> {
-  const settings = loadSettings();
-  const discovered = discoverAgents(getAgentDir());
-  const toolNames = pi
-    .getAllTools()
-    .map((tool) => tool.name)
-    .filter((name) => !SELF_TOOL_NAMES.has(name))
-    .sort();
-  const skillNames = getSkillNames(pi).sort();
-
-  const lines: string[] = [];
-  for (const agent of discovered.agents) {
-    const resolved = resolveDisplayConfig(agent, settings, ctx, pi.getThinkingLevel());
-    const tools = resolveSelectionForDisplay(agent.tools, toolNames);
-    const skills = resolveSelectionForDisplay(agent.skills, skillNames);
-    lines.push(
-      [
-        `name: ${agent.name}`,
-        `description: ${agent.description}`,
-        `source: ${agent.source}`,
-        `model: ${resolved.modelLabel ?? "main session"}`,
-        `thinking: ${resolved.thinking}`,
-        `tools: ${formatList(tools.values)}`,
-        `skills: ${formatList(skills.values)}`,
-        `context: ${agent.context}`,
-        agent.filePath ? `path: ${agent.filePath}` : undefined,
-        [...tools.warnings, ...skills.warnings, ...resolved.warnings].length > 0
-          ? `warnings: ${formatList([...tools.warnings, ...skills.warnings, ...resolved.warnings])}`
-          : undefined,
-      ]
-        .filter(Boolean)
-        .join("\n"),
-    );
+      }],
+      details: { warnings: scoped.warnings },
+    };
+  } catch (error) {
+    return executionErrorResult(error, [ctx.signal], {});
   }
-
-  if (discovered.diagnostics.length > 0) {
-    lines.push(`diagnostics:\n${discovered.diagnostics.map((d) => `- ${d}`).join("\n")}`);
-  }
-
-  return {
-    content: [{ type: "text", text: lines.join("\n\n") || "No subagents found." }],
-    details: {
-      warnings: discovered.diagnostics,
-    },
-  };
 }
 
 export async function executeSpawnSubagent(
   pi: Pick<ExtensionAPI, "appendEntry" | "getThinkingLevel">,
   registry: SubagentRegistry,
-  params: SpawnParams,
+  params: SpawnInput,
   signal: AbortSignal | undefined,
   onUpdate: AgentToolUpdateCallback<SubagentToolDetails> | undefined,
   ctx: ExtensionContext,
   selfExtensionPath: string,
 ): Promise<AgentToolResult<SubagentToolDetails>> {
+  let id: string | undefined;
+  try {
+    return await executeSpawnSubagentUnchecked(
+      pi, registry, params, signal, onUpdate, ctx, selfExtensionPath,
+      (createdId) => { id = createdId; },
+    );
+  } catch (error) {
+    return executionErrorResult(
+      error,
+      [signal, ctx.signal],
+      id ? { subagent_id: id } : {},
+      id,
+    );
+  }
+}
+
+async function executeSpawnSubagentUnchecked(
+  pi: Pick<ExtensionAPI, "appendEntry" | "getThinkingLevel">,
+  registry: SubagentRegistry,
+  params: SpawnInput,
+  signal: AbortSignal | undefined,
+  onUpdate: AgentToolUpdateCallback<SubagentToolDetails> | undefined,
+  ctx: ExtensionContext,
+  selfExtensionPath: string,
+  onId: (id: string) => void,
+): Promise<AgentToolResult<SubagentToolDetails>> {
   const settings = loadSettings();
-  const type = params.subagent_type ?? settings.defaultSubagentTypeId;
-  if (!type) {
-    return jsonResult(
-      {
-        error: {
-          code: "MISSING_SUBAGENT_TYPE",
-          message: "subagent_type was omitted and simpleSubagents.defaultSubagentTypeId is unset.",
-        },
-      },
-      {},
-    );
-  }
-
-  const discovered = discoverAgents(getAgentDir());
-  const agent = discovered.agents.find((candidate) => candidate.name === type);
-  if (!agent) {
-    return jsonResult(
-      {
-        error: {
-          code: "UNKNOWN_SUBAGENT_TYPE",
-          message: `Unknown subagent_type: ${type}`,
-        },
-      },
-      { warnings: discovered.diagnostics },
-    );
-  }
-
-  let modelOverride: Model<any> | undefined;
   let scopeWarnings: string[] = [];
   if (params.model !== undefined) {
     const scoped = await getScopedModelOptions(ctx);
     scopeWarnings = scoped.warnings;
-    const requested = params.model.trim();
-    modelOverride = scoped.options.find((option) => option.id === requested)?.model;
-    if (!modelOverride) {
-      return jsonResult(
-        {
-          error: {
-            code: "MODEL_NOT_SCOPED",
-            message: `Model override was not returned by get_scoped_models: ${params.model}`,
-          },
-        },
-        { warnings: [...discovered.diagnostics, ...scopeWarnings] },
+    if (!isScopedModelId(params.model, scoped.options.map((option) => option.id))) {
+      return errorResult(
+        "MODEL_NOT_SCOPED",
+        `Model override was not returned by get_scoped_models: ${params.model}`,
+        { warnings: scopeWarnings },
       );
     }
   }
 
+  const parentModelId = ctx.model ? formatModelId(ctx.model) : undefined;
+  if (!parentModelId && !settings.defaultModel && !params.model) {
+    return errorResult("SUBAGENT_FAILED", "The parent session has no model.", { warnings: scopeWarnings });
+  }
+  const spec = resolveSpec(params, {
+    parentModelId: parentModelId ?? params.model ?? settings.defaultModel!,
+    parentThinking: pi.getThinkingLevel(),
+    defaultModel: settings.defaultModel,
+    defaultThinking: settings.defaultThinking,
+  });
+
   setConcurrency(settings);
   const release = await getSemaphore().acquire(mergeSignals(signal, ctx.signal));
   try {
-    const id = registry.createId(agent.name);
-    const sessionManager = createSessionManager(ctx, agent, id);
+    const id = registry.createId(spec.label);
+    onId(id);
+    const sessionManager = createSessionManager(ctx, id);
     const sessionFile = sessionManager.getSessionFile();
-    if (!sessionFile) {
-      throw new Error("Subagent session manager did not create a persistent session file.");
-    }
+    if (!sessionFile) throw new Error("Subagent session manager did not create a persistent session file.");
 
     const record: RegistryRecord = {
       id,
-      type: agent.name,
+      spec,
       sessionFile,
       createdAt: new Date().toISOString(),
     };
     registry.record(pi, record);
 
-    const result = await runPrompt({
+    return await runPrompt({
       id,
-      agent,
-      prompt: params.prompt,
+      spec,
+      task: params.task,
       sessionManager,
       sessionStartReason: "startup",
       settings,
@@ -259,20 +170,36 @@ export async function executeSpawnSubagent(
       onUpdate,
       ctx,
       selfExtensionPath,
-      mainThinking: pi.getThinkingLevel(),
-      diagnostics: [...discovered.diagnostics, ...scopeWarnings],
-      modelOverride,
-      thinkingOverride: params.thinking,
+      diagnostics: scopeWarnings,
     });
-
-    return result;
   } finally {
     release();
   }
 }
 
 export async function executeMessageSubagent(
-  pi: Pick<ExtensionAPI, "getThinkingLevel">,
+  registry: SubagentRegistry,
+  params: MessageParams,
+  signal: AbortSignal | undefined,
+  onUpdate: AgentToolUpdateCallback<SubagentToolDetails> | undefined,
+  ctx: ExtensionContext,
+  selfExtensionPath: string,
+): Promise<AgentToolResult<SubagentToolDetails>> {
+  try {
+    return await executeMessageSubagentUnchecked(
+      registry, params, signal, onUpdate, ctx, selfExtensionPath,
+    );
+  } catch (error) {
+    return executionErrorResult(
+      error,
+      [signal, ctx.signal],
+      { subagent_id: params.subagent_id },
+      params.subagent_id,
+    );
+  }
+}
+
+async function executeMessageSubagentUnchecked(
   registry: SubagentRegistry,
   params: MessageParams,
   signal: AbortSignal | undefined,
@@ -282,134 +209,56 @@ export async function executeMessageSubagent(
 ): Promise<AgentToolResult<SubagentToolDetails>> {
   const record = registry.get(params.subagent_id);
   if (!record) {
-    return jsonResult(
-      {
-        subagent_id: params.subagent_id,
-        error: {
-          code: "UNKNOWN_SUBAGENT_ID",
-          message: `Unknown subagent_id: ${params.subagent_id}`,
-        },
-      },
+    return errorResult(
+      "UNKNOWN_SUBAGENT_ID",
+      `Unknown subagent_id: ${params.subagent_id}`,
       { subagent_id: params.subagent_id },
+      params.subagent_id,
+    );
+  }
+  if (!existsSync(record.sessionFile)) {
+    return errorResult(
+      "UNKNOWN_SUBAGENT_ID",
+      `Registered subagent session file no longer exists: ${record.sessionFile}`,
+      { subagent_id: record.id, sessionFile: record.sessionFile },
+      record.id,
     );
   }
 
   const settings = loadSettings();
-  const discovered = discoverAgents(getAgentDir());
-  const agent = discovered.agents.find((candidate) => candidate.name === record.type);
-  if (!agent) {
-    return jsonResult(
-      {
-        subagent_id: params.subagent_id,
-        error: {
-          code: "SUBAGENT_FAILED",
-          message: `Subagent type ${record.type} is no longer available.`,
-        },
-      },
-      {
-        subagent_id: params.subagent_id,
-        subagent_type: record.type,
-        warnings: discovered.diagnostics,
-      },
-    );
-  }
-
-  if (!existsSync(record.sessionFile)) {
-    return jsonResult(
-      {
-        subagent_id: params.subagent_id,
-        error: {
-          code: "UNKNOWN_SUBAGENT_ID",
-          message: `Registered subagent session file no longer exists: ${record.sessionFile}`,
-        },
-      },
-      {
-        subagent_id: params.subagent_id,
-        subagent_type: record.type,
-        sessionFile: record.sessionFile,
-      },
-    );
-  }
-
   setConcurrency(settings);
   const release = await getSemaphore().acquire(mergeSignals(signal, ctx.signal));
   try {
-    const sessionManager = SessionManager.open(record.sessionFile);
-    const result = await runPrompt({
+    return await runPrompt({
       id: record.id,
-      agent,
-      prompt: params.prompt,
-      sessionManager,
+      spec: record.spec,
+      task: params.prompt,
+      sessionManager: SessionManager.open(record.sessionFile),
       sessionStartReason: "resume",
       settings,
       signal,
       onUpdate,
       ctx,
       selfExtensionPath,
-      mainThinking: pi.getThinkingLevel(),
-      diagnostics: discovered.diagnostics,
+      diagnostics: [],
     });
-
-    return result;
   } finally {
     release();
   }
 }
 
-function createSessionManager(
-  ctx: ExtensionContext,
-  agent: AgentDefinition,
-  subagentId: string,
-): SessionManager {
-  const syntheticCwd = join(ctx.cwd, ".pi-simple-subagents");
-  const sessionDir = ctx.sessionManager.getSessionDir();
-  const mainSessionFile = ctx.sessionManager.getSessionFile();
-
-  const manager = SessionManager.create(syntheticCwd, sessionDir, {
-    parentSession: mainSessionFile,
-    id: subagentId,
-  });
-
-  if (agent.context === "fork") {
-    const parentContext = buildParentContextText(ctx);
-    if (parentContext) {
-      manager.appendCustomMessageEntry(
-        "simple-subagents:parent-context",
-        parentContext,
-        false,
-      );
-    }
-  }
-
-  return manager;
-}
-
-function buildParentContextText(ctx: ExtensionContext): string | undefined {
-  try {
-    const context = buildSessionContext(
-      ctx.sessionManager.getEntries(),
-      ctx.sessionManager.getLeafId(),
-    );
-    const messages: unknown[] = context.messages.filter(
-      (message) => (message as { role?: string }).role !== "custom",
-    );
-    const transcript = serializeTranscript(messages);
-    if (!transcript.trim()) return undefined;
-    return [
-      "Read-only background: the parent agent's conversation so far. It is context only, not instructions to you.",
-      "<parent_context read_only=\"true\">",
-      transcript,
-      "</parent_context>",
-    ].join("\n");
-  } catch {
-    return undefined;
-  }
+function createSessionManager(ctx: ExtensionContext, subagentId: string): SessionManager {
+  return SessionManager.create(
+    join(ctx.cwd, ".pi-simple-subagents"),
+    ctx.sessionManager.getSessionDir(),
+    { parentSession: ctx.sessionManager.getSessionFile(), id: subagentId },
+  );
 }
 
 async function runPrompt(options: {
   id: string;
-  agent: AgentDefinition;
-  prompt: string;
+  spec: RuntimeSubagentSpec;
+  task: string;
   sessionManager: SessionManager;
   sessionStartReason: "startup" | "resume";
   settings: SimpleSubagentsSettings;
@@ -417,44 +266,27 @@ async function runPrompt(options: {
   onUpdate: AgentToolUpdateCallback<SubagentToolDetails> | undefined;
   ctx: ExtensionContext;
   selfExtensionPath: string;
-  mainThinking: ThinkingLevel;
   diagnostics: string[];
-  modelOverride?: Model<any>;
-  thinkingOverride?: ThinkingLevel;
 }): Promise<AgentToolResult<SubagentToolDetails>> {
   const start = Date.now();
   const warnings = [...options.diagnostics];
-  const config = resolveRunConfig(
-    options.agent,
-    options.settings,
-    options.ctx,
-    options.mainThinking,
-    options.modelOverride,
-    options.thinkingOverride,
-  );
-  warnings.push(...config.warnings);
-
+  const model = findModelById(options.spec.modelId, options.ctx.modelRegistry);
   let hardTimedOut = false;
   let abortedByUser = false;
   let latestTool: string | undefined;
-  let activeSession:
-    | {
-        abort(): Promise<void>;
-        dispose(): void;
-        messages: unknown[];
-        sessionFile: string | undefined;
-        extensionRunner: {
-          emit(event: { type: "session_shutdown"; reason: "quit" }): Promise<unknown>;
-        };
-      }
-    | undefined;
+  let activeSession: {
+    abort(): Promise<void>;
+    dispose(): void;
+    messages: unknown[];
+    sessionFile: string | undefined;
+    extensionRunner: { emit(event: { type: "session_shutdown"; reason: "quit" }): Promise<unknown> };
+  } | undefined;
 
   const abort = () => {
     abortedByUser = true;
     void activeSession?.abort();
   };
   const cleanups = bindAbortSignals(abort, options.signal, options.ctx.signal);
-
   let baselineUsage: UsageSummary | undefined;
   const currentRunUsage = () => {
     if (!activeSession) return undefined;
@@ -464,59 +296,54 @@ async function runPrompt(options: {
 
   let progressStopped = false;
   let progressTimer: ReturnType<typeof setInterval> | undefined;
-  const progress = () => {
-    if (progressStopped) return;
-    try {
-      emitProgress();
-    } catch {
-      // The parent session was replaced or reloaded mid-run, so its ctx-bound
-      // onUpdate callback is stale. Stop reporting progress; the run itself
-      // continues and its result is returned to whoever awaits it.
-      progressStopped = true;
-      if (progressTimer) clearInterval(progressTimer);
-    }
-  };
   const emitProgress = () => {
     options.onUpdate?.({
-      content: [
-        {
-          type: "text",
-          text: `${options.id} - ${formatElapsed(Date.now() - start)}${
-            latestTool ? ` - ${latestTool}` : ""
-          }`,
-        },
-      ],
+      content: [{
+        type: "text",
+        text: `${options.id} - ${formatElapsed(Date.now() - start)}${latestTool ? ` - ${latestTool}` : ""}`,
+      }],
       details: {
         subagent_id: options.id,
-        subagent_type: options.agent.name,
         sessionFile: options.sessionManager.getSessionFile(),
         elapsedMs: Date.now() - start,
-        model: config.modelLabel,
-        thinking: config.thinking,
+        model: options.spec.modelId,
+        thinking: options.spec.thinking,
         usage: currentRunUsage(),
         warnings,
       },
     });
   };
-
+  const progress = () => {
+    if (progressStopped) return;
+    try {
+      emitProgress();
+    } catch {
+      progressStopped = true;
+      if (progressTimer) clearInterval(progressTimer);
+    }
+  };
   progressTimer = setInterval(progress, 5000);
   progress();
 
   let softTimer: ReturnType<typeof setTimeout> | undefined;
   let hardTimer: ReturnType<typeof setTimeout> | undefined;
-
   try {
+    if (!model) throw new Error(`Model "${options.spec.modelId}" was not found.`);
     const { session } = await createConfiguredSession({
-      agent: options.agent,
+      spec: options.spec,
+      model,
       sessionManager: options.sessionManager,
       sessionStartReason: options.sessionStartReason,
-      config,
       ctx: options.ctx,
       selfExtensionPath: options.selfExtensionPath,
       warnings,
     });
     activeSession = session;
     baselineUsage = summarizeUsage(session.messages);
+    if (abortedByUser || options.signal?.aborted || options.ctx.signal?.aborted) {
+      await session.abort().catch(() => undefined);
+      throw new Error("Subagent run was aborted before prompting.");
+    }
 
     const unsubscribe = session.subscribe((event) => {
       if (event.type === "tool_execution_start" || event.type === "tool_execution_update") {
@@ -528,118 +355,58 @@ async function runPrompt(options: {
       }
     });
 
-    const softMs = minutesToMs(
-      positiveNumber(options.settings.softTimeoutMinutes, DEFAULT_SOFT_TIMEOUT_MINUTES),
-    );
-    const hardMs = minutesToMs(
-      positiveNumber(options.settings.hardTimeoutMinutes, DEFAULT_HARD_TIMEOUT_MINUTES),
-    );
-
-    softTimer = setTimeout(() => {
-      void session.steer(SOFT_TIMEOUT_PROMPT).catch(() => undefined);
-    }, softMs);
-
+    const softMs = minutesToMs(positiveNumber(options.settings.softTimeoutMinutes, DEFAULT_SOFT_TIMEOUT_MINUTES));
+    const hardMs = minutesToMs(positiveNumber(options.settings.hardTimeoutMinutes, DEFAULT_HARD_TIMEOUT_MINUTES));
+    softTimer = setTimeout(() => void session.steer(SOFT_TIMEOUT_PROMPT).catch(() => undefined), softMs);
     hardTimer = setTimeout(() => {
       hardTimedOut = true;
       void session.abort().catch(() => undefined);
     }, hardMs);
 
     try {
-      await session.prompt(buildHarnessPrompt(options.agent, options.prompt, options.sessionStartReason), {
-        expandPromptTemplates: false,
-        source: "extension",
-      });
+      await session.prompt(
+        buildHarnessPrompt(options.task, options.sessionStartReason === "resume"),
+        { expandPromptTemplates: false, source: "extension" },
+      );
     } finally {
       unsubscribe();
     }
 
+    const response = hardTimedOut
+      ? await timeoutResponse(session.messages, options, model)
+      : getFinalAssistantText(session.messages, { preserveErrorMessage: true });
+    return successResult(options.id, response, session.messages, session.sessionFile, start, options.spec, warnings, baselineUsage);
+  } catch (error) {
     if (hardTimedOut) {
-      const response = await timeoutResponse(session.messages, options, config);
+      const response = await timeoutResponse(activeSession?.messages ?? [], options, model);
       return successResult(
         options.id,
         response,
-        {
-          messages: session.messages,
-          sessionFile: session.sessionFile,
-          subagentType: options.agent.name,
-        },
+        activeSession?.messages ?? [],
+        options.sessionManager.getSessionFile(),
         start,
-        config,
+        options.spec,
         warnings,
         baselineUsage,
       );
     }
-
-    const response = getFinalAssistantText(session.messages);
-    return successResult(
-      options.id,
-      response,
-      {
-        messages: session.messages,
-        sessionFile: session.sessionFile,
-        subagentType: options.agent.name,
-      },
-      start,
-      config,
+    const details: SubagentToolDetails = {
+      subagent_id: options.id,
+      sessionFile: options.sessionManager.getSessionFile(),
+      elapsedMs: Date.now() - start,
+      model: options.spec.modelId,
+      thinking: options.spec.thinking,
+      usage: currentRunUsage(),
       warnings,
-      baselineUsage,
-    );
-  } catch (error) {
-    if (hardTimedOut) {
-      const response = await timeoutResponse(activeSession?.messages ?? [], options, config);
-      return jsonResult(
-        { subagent_id: options.id, response },
-        {
-          subagent_id: options.id,
-          subagent_type: options.agent.name,
-          sessionFile: options.sessionManager.getSessionFile(),
-          elapsedMs: Date.now() - start,
-          model: config.modelLabel,
-          thinking: config.thinking,
-          usage: currentRunUsage(),
-          warnings,
-        },
-      );
-    }
-
+    };
     if (abortedByUser || options.signal?.aborted || options.ctx.signal?.aborted) {
-      return jsonResult(
-        {
-          subagent_id: options.id,
-          error: {
-            code: "ABORTED",
-            message: "Subagent run was aborted.",
-          },
-        },
-        {
-          subagent_id: options.id,
-          subagent_type: options.agent.name,
-          sessionFile: options.sessionManager.getSessionFile(),
-          elapsedMs: Date.now() - start,
-          model: config.modelLabel,
-          thinking: config.thinking,
-          warnings,
-        },
-      );
+      return errorResult("ABORTED", "Subagent run was aborted.", details, options.id);
     }
-
-    return jsonResult(
-      {
-        subagent_id: options.id,
-        error: {
-          code: "SUBAGENT_FAILED",
-          message: error instanceof Error ? error.message : String(error),
-        },
-      },
-      {
-        subagent_id: options.id,
-        subagent_type: options.agent.name,
-        sessionFile: options.sessionManager.getSessionFile(),
-        elapsedMs: Date.now() - start,
-        model: config.modelLabel,
-        thinking: config.thinking,
-        warnings,
-      },
+    return errorResult(
+      "SUBAGENT_FAILED",
+      error instanceof Error ? error.message : String(error),
+      details,
+      options.id,
     );
   } finally {
     if (softTimer) clearTimeout(softTimer);
@@ -647,16 +414,8 @@ async function runPrompt(options: {
     if (progressTimer) clearInterval(progressTimer);
     for (const cleanup of cleanups) cleanup();
     if (activeSession) {
-      // AgentSession.dispose() invalidates every bound extension ctx WITHOUT
-      // emitting session_shutdown. Extensions that start timers on
-      // session_start (e.g. usage-footer extensions) would keep firing
-      // against a stale ctx and crash pi from a timer callback. Emit the
-      // shutdown event ourselves so they can clean up first.
       try {
-        await activeSession.extensionRunner.emit({
-          type: "session_shutdown",
-          reason: "quit",
-        });
+        await activeSession.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
       } catch {
         // Best effort: dispose regardless.
       }
@@ -665,99 +424,66 @@ async function runPrompt(options: {
   }
 }
 
-function buildHarnessSystemPrompt(agent: AgentDefinition): string {
-  const source = `${agent.source} agent file: ${agent.filePath}`;
-  return [
-    `You are the ${agent.name} subagent.`,
-    `Your role instructions from ${source} are authoritative:`,
-    "",
-    agent.body.trim(),
-  ].join("\n");
-}
-
-function buildHarnessPrompt(
-  agent: AgentDefinition,
-  prompt: string,
-  sessionStartReason: "startup" | "resume",
-): string {
-  const taskKind = sessionStartReason === "resume" ? "follow-up task" : "task";
-  return [
-    `Parent ${taskKind} for the ${agent.name} subagent.`,
-    "Any <parent_context> block is read-only background; the active instruction is inside <parent_task>.",
-    "",
-    "<parent_task>",
-    prompt,
-    "</parent_task>",
-  ].join("\n");
-}
-
 async function createConfiguredSession(options: {
-  agent: AgentDefinition;
+  spec: RuntimeSubagentSpec;
+  model: Model<any>;
   sessionManager: SessionManager;
   sessionStartReason: "startup" | "resume";
-  config: ResolvedRunConfig;
   ctx: ExtensionContext;
   selfExtensionPath: string;
   warnings: string[];
 }) {
   const agentDir = getAgentDir();
-  const settingsManager = SettingsManager.create(options.ctx.cwd, agentDir, {
-    projectTrusted: false,
-  });
+  const settingsManager = SettingsManager.create(options.ctx.cwd, agentDir, { projectTrusted: false });
   const selfPath = normalizeExtensionPath(options.selfExtensionPath);
-
   const resourceLoader = new DefaultResourceLoader({
     cwd: options.ctx.cwd,
     agentDir,
     settingsManager,
-    systemPromptOverride: () => buildHarnessSystemPrompt(options.agent),
+    systemPromptOverride: () => options.spec.systemPrompt,
     extensionsOverride: (base) => filterSubagentExtensions(base, selfPath),
-    skillsOverride: (base) => filterSkills(base, options.agent.skills, options.warnings),
+    skillsOverride: (base) => {
+      const filtered = filterSkillSelection(base.skills.map((skill) => skill.name), options.spec.skills);
+      options.warnings.push(...filtered.warnings);
+      const allowed = new Set(filtered.selected);
+      return { ...base, skills: base.skills.filter((skill) => allowed.has(skill.name)) };
+    },
   });
   await resourceLoader.reload();
 
   const created = await createAgentSession({
     cwd: options.ctx.cwd,
     agentDir,
-    model: options.config.model,
-    thinkingLevel: options.config.thinking,
+    model: options.model,
+    thinkingLevel: options.spec.thinking,
     resourceLoader,
     settingsManager,
     sessionManager: options.sessionManager,
-    sessionStartEvent: {
-      type: "session_start",
-      reason: options.sessionStartReason,
-    },
+    sessionStartEvent: { type: "session_start", reason: options.sessionStartReason },
   });
-
   await created.session.bindExtensions({
     mode: "print",
-    onError: (error) => {
-      options.warnings.push(
-        `Extension error (${error.extensionPath}, ${error.event}): ${error.error}`,
-      );
-    },
+    onError: (error) => options.warnings.push(
+      `Extension error (${error.extensionPath}, ${error.event}): ${error.error}`,
+    ),
   });
 
-  const toolSelection = resolveTools(created.session.getAllTools(), options.agent.tools);
+  const toolSelection = filterToolSelection(
+    created.session.getAllTools().map((tool) => tool.name),
+    options.spec.tools,
+  );
   options.warnings.push(...toolSelection.warnings);
-  created.session.setActiveToolsByName(toolSelection.tools);
-
+  created.session.setActiveToolsByName(toolSelection.selected);
   return created;
 }
 
-function filterSubagentExtensions(
-  base: LoadExtensionsResult,
-  selfPath: string,
-): LoadExtensionsResult {
+function filterSubagentExtensions(base: LoadExtensionsResult, selfPath: string): LoadExtensionsResult {
   return {
     ...base,
     extensions: base.extensions.filter((extension) => {
       const extensionPath = normalizeExtensionPath(extension.resolvedPath);
-      return (
-        extensionPath !== selfPath &&
-        !SUBAGENT_EXTENSION_EXCLUDE_PATH_PARTS.some((part) => extensionPath.includes(part))
-      );
+      return extensionPath !== selfPath &&
+        !SUBAGENT_EXTENSION_EXCLUDE_PATH_PARTS.some((part) => extensionPath.includes(part));
     }),
   };
 }
@@ -766,204 +492,45 @@ function normalizeExtensionPath(path: string): string {
   return resolve(path).replaceAll("\\", "/");
 }
 
-function filterSkills(
-  base: ReturnType<DefaultResourceLoader["getSkills"]>,
-  spec: SelectionSpec,
-  warnings: string[],
-): ReturnType<DefaultResourceLoader["getSkills"]> {
-  if (spec === "all") return base;
-
-  const allowed = new Set(spec);
-  const available = new Set(base.skills.map((skill) => skill.name));
-  for (const name of allowed) {
-    if (!available.has(name)) {
-      warnings.push(`Unknown skill "${name}" requested by agent frontmatter.`);
-    }
-  }
-
-  return {
-    ...base,
-    skills: base.skills.filter((skill) => allowed.has(skill.name)),
-  };
-}
-
-function resolveTools(tools: ToolInfo[], spec: SelectionSpec): { tools: string[]; warnings: string[] } {
-  const available = tools
-    .map((tool) => tool.name)
-    .filter((name) => !SELF_TOOL_NAMES.has(name));
-
-  if (spec === "all") {
-    return { tools: available, warnings: [] };
-  }
-
-  const availableSet = new Set(available);
-  const warnings: string[] = [];
-  const selected = spec.filter((name) => {
-    if (!availableSet.has(name)) {
-      warnings.push(`Unknown tool "${name}" requested by agent frontmatter.`);
-      return false;
-    }
-    return true;
-  });
-
-  return { tools: selected, warnings };
-}
-
-function resolveRunConfig(
-  agent: AgentDefinition,
-  settings: SimpleSubagentsSettings,
-  ctx: ExtensionContext,
-  mainThinking: ThinkingLevel,
-  modelOverride?: Model<any>,
-  thinkingOverride?: ThinkingLevel,
-): ResolvedRunConfig {
-  const warnings: string[] = [];
-  const override = settings.builtinSubagentOverrides?.[agent.name];
-  const modelSpec = override?.model ?? agent.model ?? settings.defaultModel;
-  const model = modelOverride ?? resolveModel(modelSpec, ctx.model, ctx.modelRegistry, warnings);
-  const thinking =
-    thinkingOverride ?? override?.thinking ?? agent.thinking ?? settings.defaultThinking ?? mainThinking;
-
-  return {
-    model,
-    modelLabel: model ? `${model.provider}/${model.id}` : undefined,
-    thinking,
-    warnings,
-  };
-}
-
-function resolveDisplayConfig(
-  agent: AgentDefinition,
-  settings: SimpleSubagentsSettings,
-  ctx: ExtensionContext,
-  mainThinking: ThinkingLevel,
-): ResolvedRunConfig {
-  return resolveRunConfig(agent, settings, ctx, mainThinking);
-}
-
-function resolveModel(
-  spec: string | undefined,
-  fallback: Model<any> | undefined,
-  modelRegistry: ModelRegistry,
-  warnings: string[],
-): Model<any> | undefined {
-  if (!spec) return fallback;
-
-  const parsed = parseModelSpec(spec, fallback?.provider);
-  if (!parsed) {
-    warnings.push(`Invalid model spec "${spec}". Expected provider/model.`);
-    return fallback;
-  }
-
-  const model = modelRegistry.find(parsed.provider, parsed.modelId);
-  if (!model) {
-    warnings.push(`Model "${parsed.provider}/${parsed.modelId}" was not found. Using main session model.`);
-    return fallback;
-  }
-  return model;
-}
-
 async function getScopedModelOptions(ctx: ExtensionContext): Promise<{
   options: Array<{ id: string; model: Model<any> }>;
   warnings: string[];
 }> {
-  ctx.modelRegistry.refresh();
-  const available = ctx.modelRegistry.getAvailable();
   const settingsManager = SettingsManager.create(ctx.cwd, getAgentDir(), {
     projectTrusted: ctx.isProjectTrusted(),
   });
-  const patterns = settingsManager.getEnabledModels();
-  const settingsWarnings = settingsManager
-    .drainErrors()
-    .map(({ error }) => `Pi settings: ${error.message}`);
-
-  if (!patterns || patterns.length === 0) {
-    return { options: toModelOptions(available), warnings: settingsWarnings };
-  }
-
-  const resolved = await resolveModelScopeWithDiagnostics(patterns, ctx.modelRegistry);
-  return {
-    options: toModelOptions(
-      resolved.scopedModels.length > 0
-        ? resolved.scopedModels.map(({ model }) => model)
-        : available,
-    ),
-    warnings: [
-      ...settingsWarnings,
-      ...resolved.diagnostics.map(({ message }) => message),
-    ],
-  };
+  const modelRuntime = await ModelRuntime.create();
+  const scoped = await resolveScopedModels(modelRuntime, settingsManager);
+  return { options: toModelOptions(scoped.models), warnings: scoped.warnings };
 }
 
 function toModelOptions(models: Model<any>[]): Array<{ id: string; model: Model<any> }> {
-  return models.map((model) => ({
-    id: `${model.provider}/${model.id}`,
-    model,
-  }));
-}
-
-function parseModelSpec(
-  spec: string,
-  fallbackProvider: string | undefined,
-): { provider: string; modelId: string } | undefined {
-  const trimmed = spec.trim();
-  const slash = trimmed.indexOf("/");
-  if (slash > 0 && slash < trimmed.length - 1) {
-    return {
-      provider: trimmed.slice(0, slash),
-      modelId: trimmed.slice(slash + 1),
-    };
-  }
-  if (slash === -1 && fallbackProvider) {
-    return { provider: fallbackProvider, modelId: trimmed };
-  }
-  return undefined;
+  return models.map((model) => ({ id: formatModelId(model), model }));
 }
 
 async function timeoutResponse(
   messages: unknown[],
-  options: {
-    settings: SimpleSubagentsSettings;
-    agent: AgentDefinition;
-    ctx: ExtensionContext;
-  },
-  config: ResolvedRunConfig,
+  options: { settings: SimpleSubagentsSettings; ctx: ExtensionContext },
+  runModel: Model<any> | undefined,
 ): Promise<string> {
-  if (!options.settings.summarizeOnTimeout) {
-    return TIMEOUT_ABORT_MESSAGE;
-  }
-
+  if (!options.settings.summarizeOnTimeout) return TIMEOUT_ABORT_MESSAGE;
   try {
-    const summaryModel = resolveModel(
-      options.settings.timeoutSummaryModel ?? options.settings.defaultModel,
-      config.model,
-      options.ctx.modelRegistry,
-      [],
-    );
+    const summaryModel = options.settings.timeoutSummaryModel
+      ? findModelById(options.settings.timeoutSummaryModel, options.ctx.modelRegistry) ?? runModel
+      : options.settings.defaultModel
+        ? findModelById(options.settings.defaultModel, options.ctx.modelRegistry) ?? runModel
+        : runModel;
     if (!summaryModel) return TIMEOUT_ABORT_MESSAGE;
-
     const auth = await options.ctx.modelRegistry.getApiKeyAndHeaders(summaryModel);
     if (!auth.ok) return TIMEOUT_ABORT_MESSAGE;
-
     const message = await completeSimple(
       summaryModel,
       {
-        systemPrompt:
-          "Summarize an aborted subagent session for the main agent. Include what was attempted, what was accomplished, what remains unfinished, and any concrete results. Be concise.",
-        messages: [
-          {
-            role: "user",
-            content: serializeTranscript(messages),
-            timestamp: Date.now(),
-          },
-        ],
+        systemPrompt: "Summarize an aborted subagent session for the main agent. Include what was attempted, what was accomplished, what remains unfinished, and any concrete results. Be concise.",
+        messages: [{ role: "user", content: serializeTranscript(messages), timestamp: Date.now() }],
       },
-      {
-        apiKey: auth.apiKey,
-        headers: auth.headers,
-      },
+      { apiKey: auth.apiKey, headers: auth.headers },
     );
-
     const text = extractAssistantText(message);
     return `${TIMEOUT_SUMMARY_PREFIX} ${text || "No summary text was produced."}`;
   } catch {
@@ -974,58 +541,60 @@ async function timeoutResponse(
 function successResult(
   id: string,
   response: string,
-  session: {
-    messages: unknown[];
-    sessionFile: string | undefined;
-    subagentType?: string;
-  },
+  messages: unknown[],
+  sessionFile: string | undefined,
   start: number,
-  config: ResolvedRunConfig,
+  spec: RuntimeSubagentSpec,
   warnings: string[],
   baselineUsage?: UsageSummary,
 ): AgentToolResult<SubagentToolDetails> {
-  return jsonResult(
-    {
-      subagent_id: id,
-      response,
-    },
-    {
-      subagent_id: id,
-      subagent_type: session.subagentType,
-      sessionFile: session.sessionFile,
-      elapsedMs: Date.now() - start,
-      model: config.modelLabel,
-      thinking: config.thinking,
-      usage: baselineUsage
-        ? subtractUsage(summarizeUsage(session.messages), baselineUsage)
-        : summarizeUsage(session.messages),
-      warnings,
-    },
+  return textResult(`subagent_id: ${id}\n${response}`, {
+    subagent_id: id,
+    sessionFile,
+    elapsedMs: Date.now() - start,
+    model: spec.modelId,
+    thinking: spec.thinking,
+    usage: baselineUsage
+      ? subtractUsage(summarizeUsage(messages), baselineUsage)
+      : summarizeUsage(messages),
+    warnings,
+  });
+}
+
+function executionErrorResult(
+  error: unknown,
+  signals: Array<AbortSignal | undefined>,
+  details: SubagentToolDetails,
+  id?: string,
+): AgentToolResult<SubagentToolDetails> {
+  const aborted = signals.some((signal) => signal?.aborted) ||
+    (error instanceof Error && error.name === "AbortError");
+  return errorResult(
+    aborted ? "ABORTED" : "SUBAGENT_FAILED",
+    aborted ? "Subagent run was aborted." : error instanceof Error ? error.message : String(error),
+    details,
+    id,
   );
 }
 
-function jsonResult(
-  payload: unknown,
+function errorResult(
+  code: string,
+  message: string,
   details: SubagentToolDetails,
+  id?: string,
 ): AgentToolResult<SubagentToolDetails> {
-  return {
-    content: [
-      {
-        type: "text",
-        text: JSON.stringify(payload, null, 2),
-      },
-    ],
-    details,
-  };
+  return textResult(`${id ? `subagent_id: ${id}\n` : ""}ERROR [${code}]: ${message}`, details);
+}
+
+function textResult(text: string, details: SubagentToolDetails): AgentToolResult<SubagentToolDetails> {
+  return { content: [{ type: "text", text }], details };
 }
 
 function setConcurrency(settings: SimpleSubagentsSettings): void {
-  const max = Math.max(
-    1,
-    Math.floor(
-      positiveNumber(settings.maxConcurrentSubagents, DEFAULT_MAX_CONCURRENT_SUBAGENTS),
-    ),
-  );
+  const max = Math.max(1, Math.floor(positiveNumber(
+    settings.maxConcurrentSubagents,
+    DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+  )));
   getSemaphore(max).setMax(max);
 }
 
@@ -1040,62 +609,7 @@ function minutesToMs(minutes: number): number {
 
 function formatElapsed(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${minutes}m${seconds.toString().padStart(2, "0")}s`;
-}
-
-function getFinalAssistantText(messages: unknown[]): string {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i];
-    if (isAssistantMessage(message)) {
-      return extractAssistantText(message) || message.errorMessage || "";
-    }
-  }
-  return "";
-}
-
-function extractAssistantText(message: AssistantMessage): string {
-  return message.content
-    .filter((part): part is TextContent => part.type === "text")
-    .map((part) => part.text)
-    .join("\n")
-    .trim();
-}
-
-function summarizeUsage(messages: unknown[]): UsageSummary {
-  const summary: UsageSummary = {
-    assistantTurns: 0,
-    input: 0,
-    output: 0,
-    cacheRead: 0,
-    cacheWrite: 0,
-    totalTokens: 0,
-    cost: {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      total: 0,
-    },
-  };
-
-  for (const message of messages) {
-    if (!isAssistantMessage(message)) continue;
-    summary.assistantTurns += 1;
-    summary.input += message.usage.input;
-    summary.output += message.usage.output;
-    summary.cacheRead += message.usage.cacheRead;
-    summary.cacheWrite += message.usage.cacheWrite;
-    summary.totalTokens += message.usage.totalTokens;
-    summary.cost.input += message.usage.cost.input;
-    summary.cost.output += message.usage.cost.output;
-    summary.cost.cacheRead += message.usage.cost.cacheRead;
-    summary.cost.cacheWrite += message.usage.cost.cacheWrite;
-    summary.cost.total += message.usage.cost.total;
-  }
-
-  return summary;
+  return `${Math.floor(totalSeconds / 60)}m${(totalSeconds % 60).toString().padStart(2, "0")}s`;
 }
 
 function subtractUsage(current: UsageSummary, baseline: UsageSummary): UsageSummary {
@@ -1119,87 +633,27 @@ function subtractUsage(current: UsageSummary, baseline: UsageSummary): UsageSumm
 
 function serializeTranscript(messages: unknown[]): string {
   if (messages.length === 0) return "No transcript messages were available.";
-
-  return messages
-    .map((message) => {
-      if (!message || typeof message !== "object") return "";
-      const raw = message as { role?: string; content?: unknown; summary?: unknown };
-      if (raw.role === "assistant" && isAssistantMessage(message)) {
-        return `Assistant: ${extractAssistantText(message)}`;
-      }
-      if (raw.role === "user") {
-        return `User: ${contentToText(raw.content)}`;
-      }
-      if (raw.role === "toolResult") {
-        return `Tool result: ${contentToText(raw.content)}`;
-      }
-      if (raw.role === "compactionSummary" || raw.role === "branchSummary") {
-        const summary = raw.summary;
-        if (typeof summary === "string" && summary.trim()) {
-          return `Summary of earlier conversation:\n${summary}`;
-        }
-      }
-      return "";
-    })
-    .filter(Boolean)
-    .join("\n\n");
+  return messages.map((message) => {
+    if (!message || typeof message !== "object") return "";
+    const raw = message as { role?: string; content?: unknown; summary?: unknown };
+    if (raw.role === "assistant" && isAssistantMessage(message)) return `Assistant: ${extractAssistantText(message)}`;
+    if (raw.role === "user") return `User: ${contentToText(raw.content)}`;
+    if (raw.role === "toolResult") return `Tool result: ${contentToText(raw.content)}`;
+    if ((raw.role === "compactionSummary" || raw.role === "branchSummary") && typeof raw.summary === "string") {
+      return `Summary of earlier conversation:\n${raw.summary}`;
+    }
+    return "";
+  }).filter(Boolean).join("\n\n");
 }
 
 function contentToText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
-  return content
-    .map((part) => {
-      if (part && typeof part === "object" && (part as TextContent).type === "text") {
-        return (part as TextContent).text;
-      }
-      if (part && typeof part === "object" && (part as ImageContent).type === "image") {
-        return "[image]";
-      }
-      return "";
-    })
-    .filter(Boolean)
-    .join("\n");
-}
-
-function isAssistantMessage(value: unknown): value is AssistantMessage {
-  return (
-    !!value &&
-    typeof value === "object" &&
-    (value as { role?: unknown }).role === "assistant" &&
-    Array.isArray((value as { content?: unknown }).content) &&
-    !!(value as { usage?: unknown }).usage
-  );
-}
-
-function resolveSelectionForDisplay(
-  spec: SelectionSpec,
-  available: string[],
-): { values: string[]; warnings: string[] } {
-  if (spec === "all") return { values: available, warnings: [] };
-
-  const availableSet = new Set(available);
-  const warnings: string[] = [];
-  const values = spec.filter((name) => {
-    if (!availableSet.has(name)) {
-      warnings.push(`Unknown ${name}`);
-      return false;
-    }
-    return true;
-  });
-  return { values, warnings };
-}
-
-function getSkillNames(pi: Pick<ExtensionAPI, "getCommands">): string[] {
-  return pi
-    .getCommands()
-    .map((command) => command.name)
-    .filter((name) => name.startsWith("skill:"))
-    .map((name) => name.slice("skill:".length));
-}
-
-function formatList(values: string[]): string {
-  return values.length > 0 ? values.join(", ") : "none";
+  return content.map((part) => {
+    if (part && typeof part === "object" && (part as TextContent).type === "text") return (part as TextContent).text;
+    if (part && typeof part === "object" && (part as ImageContent).type === "image") return "[image]";
+    return "";
+  }).filter(Boolean).join("\n");
 }
 
 function bindAbortSignals(
@@ -1220,5 +674,7 @@ function bindAbortSignals(
 }
 
 function mergeSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
-  return signals.find((signal) => signal?.aborted) ?? signals.find(Boolean);
+  const present = signals.filter((signal): signal is AbortSignal => signal !== undefined);
+  if (present.length === 0) return undefined;
+  return present.length === 1 ? present[0] : AbortSignal.any(present);
 }
