@@ -37,7 +37,7 @@ import { filterSkillSelection, filterToolSelection } from "../shared/tools.ts";
 import type { ThinkingLevel } from "../shared/types.ts";
 import type { RegistryRecord, SubagentRegistry } from "./registry.ts";
 import { Semaphore } from "./semaphore.ts";
-import { loadSettings, positiveNumber, type SimpleSubagentsSettings } from "./settings.ts";
+import { loadSettings, positiveNumber, type SubagentWorkflowsSettings } from "./settings.ts";
 
 const SUBAGENT_EXTENSION_EXCLUDE_PATH_PARTS = ["/pi-session-naming/"] as const;
 const DEFAULT_SOFT_TIMEOUT_MINUTES = 30;
@@ -249,7 +249,7 @@ async function executeMessageSubagentUnchecked(
 
 function createSessionManager(ctx: ExtensionContext, subagentId: string): SessionManager {
   return SessionManager.create(
-    join(ctx.cwd, ".pi-simple-subagents"),
+    join(ctx.cwd, ".pi-subagent-workflows"),
     ctx.sessionManager.getSessionDir(),
     { parentSession: ctx.sessionManager.getSessionFile(), id: subagentId },
   );
@@ -261,7 +261,7 @@ async function runPrompt(options: {
   task: string;
   sessionManager: SessionManager;
   sessionStartReason: "startup" | "resume";
-  settings: SimpleSubagentsSettings;
+  settings: SubagentWorkflowsSettings;
   signal: AbortSignal | undefined;
   onUpdate: AgentToolUpdateCallback<SubagentToolDetails> | undefined;
   ctx: ExtensionContext;
@@ -510,7 +510,7 @@ function toModelOptions(models: Model<any>[]): Array<{ id: string; model: Model<
 
 async function timeoutResponse(
   messages: unknown[],
-  options: { settings: SimpleSubagentsSettings; ctx: ExtensionContext },
+  options: { settings: SubagentWorkflowsSettings; ctx: ExtensionContext },
   runModel: Model<any> | undefined,
 ): Promise<string> {
   if (!options.settings.summarizeOnTimeout) return TIMEOUT_ABORT_MESSAGE;
@@ -590,7 +590,7 @@ function textResult(text: string, details: SubagentToolDetails): AgentToolResult
   return { content: [{ type: "text", text }], details };
 }
 
-function setConcurrency(settings: SimpleSubagentsSettings): void {
+function setConcurrency(settings: SubagentWorkflowsSettings): void {
   const max = Math.max(1, Math.floor(positiveNumber(
     settings.maxConcurrentSubagents,
     DEFAULT_MAX_CONCURRENT_SUBAGENTS,

@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { RuntimeSubagentSpec } from "../shared/spec.ts";
 
-export const REGISTRY_ENTRY_TYPE = "simple-subagents:spawn";
+export const REGISTRY_ENTRY_TYPE = "subagent-workflows:spawn";
 
 export interface RegistryRecord {
   id: string;

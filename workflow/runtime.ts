@@ -65,7 +65,7 @@ export async function createWorkflowContext(config: WorkflowConfig = {}): Promis
   const agentDir = getAgentDir();
   const modelRuntime = await ModelRuntime.create();
   const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
-  const custom = getSimpleSubagentSettings(settingsManager);
+  const custom = getSubagentWorkflowSettings(settingsManager);
   const model = await resolveDefaultModel(modelRuntime, settingsManager, custom.defaultModel);
   const budget: WorkflowBudget = {
     ...DEFAULT_BUDGET,
@@ -73,7 +73,7 @@ export async function createWorkflowContext(config: WorkflowConfig = {}): Promis
     ...config.budget,
   };
   const journal = new Journal({
-    dir: config.journal?.dir ?? join(cwd, ".pi-simple-subagents", "journals"),
+    dir: config.journal?.dir ?? join(cwd, ".pi-subagent-workflows", "journals"),
     enabled: config.journal?.enabled,
   });
   await journal.load();
@@ -94,12 +94,12 @@ export async function createWorkflowContext(config: WorkflowConfig = {}): Promis
 async function resolveDefaultModel(
   runtime: ModelRuntime,
   settings: SettingsManager,
-  simpleDefault: string | undefined,
+  workflowDefault: string | undefined,
 ): Promise<Model<any>> {
-  if (simpleDefault) {
-    const model = findRuntimeModelById(simpleDefault, runtime);
+  if (workflowDefault) {
+    const model = findRuntimeModelById(workflowDefault, runtime);
     if (model) return model;
-    throw new Error(`Configured simpleSubagents.defaultModel was not found: ${simpleDefault}`);
+    throw new Error(`Configured subagentWorkflows.defaultModel was not found: ${workflowDefault}`);
   }
   const defaultModel = settings.getDefaultModel();
   const defaultProvider = settings.getDefaultProvider();
@@ -112,7 +112,7 @@ async function resolveDefaultModel(
   return available[0]!;
 }
 
-function getSimpleSubagentSettings(settings: SettingsManager): {
+function getSubagentWorkflowSettings(settings: SettingsManager): {
   defaultModel?: string;
   defaultThinking?: ThinkingLevel;
   maxConcurrentSubagents?: number;
@@ -120,8 +120,8 @@ function getSimpleSubagentSettings(settings: SettingsManager): {
   const global = settings.getGlobalSettings() as unknown as Record<string, unknown>;
   const project = settings.getProjectSettings() as unknown as Record<string, unknown>;
   const merged = {
-    ...asRecord(global.simpleSubagents),
-    ...asRecord(project.simpleSubagents),
+    ...asRecord(global.subagentWorkflows),
+    ...asRecord(project.subagentWorkflows),
   };
   return {
     defaultModel: typeof merged.defaultModel === "string" ? merged.defaultModel : undefined,

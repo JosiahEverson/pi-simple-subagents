@@ -161,7 +161,7 @@ function formatModel(model: { provider: string; id: string } | undefined): strin
   return model ? `${model.provider}/${model.id}` : undefined;
 }
 
-export default function simpleSubagents(pi: ExtensionAPI) {
+export default function subagentWorkflows(pi: ExtensionAPI) {
   installStaleCtxGuard();
   const registry = new SubagentRegistry();
   let mainModel: string | undefined;

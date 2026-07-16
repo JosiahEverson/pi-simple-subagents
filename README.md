@@ -1,4 +1,4 @@
-# pi-simple-subagents
+# pi-subagent-workflows
 
 Inline-defined subagents and workflow orchestration for [Pi](https://github.com/earendil-works/pi-coding-agent).
 
@@ -6,11 +6,11 @@ There are no prebuilt agent roles. Every subagent is defined at spawn time by th
 
 ## Install
 
-Add the package to `~/.pi/agent/settings.json`:
-
-```json
-{ "packages": ["pi-simple-subagents"] }
+```sh
+pi install npm:pi-subagent-workflows
 ```
+
+Or add `"npm:pi-subagent-workflows"` to the `packages` array in `~/.pi/agent/settings.json`.
 
 ## Tools
 
@@ -39,10 +39,10 @@ Lists exact model IDs permitted by Pi's `enabledModels`.
 
 ## Workflow library
 
-`pi-simple-subagents/workflow` is a programmatic orchestration layer for scripts run outside the Pi process:
+`pi-subagent-workflows/workflow` is a programmatic orchestration layer for scripts run outside the Pi process:
 
 ```ts
-import { createWorkflowRuntime } from "pi-simple-subagents/workflow";
+import { createWorkflowRuntime } from "pi-subagent-workflows/workflow";
 
 const wf = await createWorkflowRuntime({ budget: { maxTotalAgents: 30 } });
 const audits = await wf.pipeline(files, async (file) => ({
@@ -62,7 +62,7 @@ The packaged `subagent-workflows` skill teaches the orchestrating model both sur
 
 ## Settings
 
-Under `simpleSubagents` in Pi settings:
+Under `subagentWorkflows` in Pi settings:
 
 | Key | Default | |
 |---|---|---|

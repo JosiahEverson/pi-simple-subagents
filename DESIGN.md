@@ -1,4 +1,4 @@
-# pi-simple-subagents Design
+# pi-subagent-workflows Design
 
 ## 1. Architecture Overview
 
@@ -22,7 +22,7 @@ A single canonical intermediate representation — `RuntimeSubagentSpec` — dec
 └──────────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────┐
-│  Workflow library (subpath export "pi-simple-subagents/workflow")     │
+│  Workflow library (subpath export "pi-subagent-workflows/workflow")     │
 │                                                                      │
 │  agent(task, opts) ──► resolveSpec() ──► RuntimeSubagentSpec         │
 │                                              │                       │
@@ -162,9 +162,9 @@ export interface ResolutionContext {
   parentModelId: string;
   /** Parent session's current thinking level */
   parentThinking: ThinkingLevel;
-  /** Settings: simpleSubagents.defaultModel */
+  /** Settings: subagentWorkflows.defaultModel */
   defaultModel?: string;
-  /** Settings: simpleSubagents.defaultThinking */
+  /** Settings: subagentWorkflows.defaultThinking */
   defaultThinking?: ThinkingLevel;
 }
 
@@ -178,13 +178,13 @@ export function resolveSpec(input: SpawnInput, context: ResolutionContext): Runt
 **Resolution precedence (model):**
 
 1. `input.model` (spawn arg — must be exact scoped-model ID, validated upstream)
-2. `context.defaultModel` (settings `simpleSubagents.defaultModel`)
+2. `context.defaultModel` (settings `subagentWorkflows.defaultModel`)
 3. `context.parentModelId` (current parent model)
 
 **Resolution precedence (thinking):**
 
 1. `input.thinking` (spawn arg)
-2. `context.defaultThinking` (settings `simpleSubagents.defaultThinking`)
+2. `context.defaultThinking` (settings `subagentWorkflows.defaultThinking`)
 3. `context.parentThinking` (parent session thinking)
 
 **System prompt construction:**
@@ -241,7 +241,7 @@ export function buildHarnessPrompt(task: string, isFollowUp: boolean): string {
 ```typescript
 // extension/registry.ts
 
-export const REGISTRY_ENTRY_TYPE = "simple-subagents:spawn";
+export const REGISTRY_ENTRY_TYPE = "subagent-workflows:spawn";
 
 export interface RegistryRecord {
   id: string;
@@ -363,7 +363,7 @@ interface SubagentToolDetails {
 The workflow library is imported by orchestrator-written scripts:
 
 ```typescript
-import { agent, parallel, pipeline, phase, log, createWorkflowRuntime } from "pi-simple-subagents/workflow";
+import { agent, parallel, pipeline, phase, log, createWorkflowRuntime } from "pi-subagent-workflows/workflow";
 ```
 
 These scripts are written to `/tmp`, then executed via Pi's `bash` tool as a child process (e.g. `npx tsx /tmp/workflow-abc.ts`). The workflow library links against the Pi SDK (`@earendil-works/pi-coding-agent`) as a peer dependency.
@@ -576,7 +576,7 @@ export class BudgetExceededError extends Error {
 // workflow/journal.ts
 
 export interface JournalConfig {
-  /** Directory to persist journal files. Default: cwd/.pi-simple-subagents/journals/ */
+  /** Directory to persist journal files. Default: cwd/.pi-subagent-workflows/journals/ */
   dir?: string;
 
   /** Enable journal persistence and resume. Default: true. */
@@ -719,7 +719,7 @@ All workflow errors include `agentId` (if available), `task` (truncated), and `u
 | Priority | Source | Notes |
 |:---:|--------|-------|
 | 1 | `spawn_subagent.model` or `agent(task, {model})` | Must be exact scoped-model ID |
-| 2 | `settings.simpleSubagents.defaultModel` | Must be valid provider/model |
+| 2 | `settings.subagentWorkflows.defaultModel` | Must be valid provider/model |
 | 3 | Parent session model ID | Always available |
 
 ### Thinking Level
@@ -727,7 +727,7 @@ All workflow errors include `agentId` (if available), `task` (truncated), and `u
 | Priority | Source |
 |:---:|--------|
 | 1 | Spawn arg `thinking` |
-| 2 | `settings.simpleSubagents.defaultThinking` |
+| 2 | `settings.subagentWorkflows.defaultThinking` |
 | 3 | Parent session thinking level |
 
 ### Tools
@@ -765,7 +765,7 @@ Unknown skill names: warn, omit. Do not fail.
 ```typescript
 // extension/settings.ts
 
-export interface SimpleSubagentsSettings {
+export interface SubagentWorkflowsSettings {
   /** Default model ID (provider/model). */
   defaultModel?: string;
 
@@ -810,7 +810,7 @@ skills/
 ---
 name: subagent-workflows
 description: >
-  Spawn subagents and write workflow orchestration scripts for pi-simple-subagents.
+  Spawn subagents and write workflow orchestration scripts for pi-subagent-workflows.
   Use when delegating tasks to subagents, writing multi-agent fan-out scripts,
   or designing structured agent pipelines.
 ---
@@ -981,7 +981,7 @@ Workflow scripts run in a child process and create sessions via the SDK directly
 
 ### Workflow script execution environment
 
-Scripts are TypeScript files executed via `npx tsx /tmp/workflow-xxx.ts` (or `node --import tsx`). They import from `pi-simple-subagents/workflow` which resolves via the installed package. The workflow library initializes its own `ModelRuntime` and `SettingsManager` instances to create sessions. The orchestrator model must ensure the package is importable (it is installed as a Pi package, so its path is known).
+Scripts are TypeScript files executed via `npx tsx /tmp/workflow-xxx.ts` (or `node --import tsx`). They import from `pi-subagent-workflows/workflow` which resolves via the installed package. The workflow library initializes its own `ModelRuntime` and `SettingsManager` instances to create sessions. The orchestrator model must ensure the package is importable (it is installed as a Pi package, so its path is known).
 
 ### Token/cost budget accuracy
 

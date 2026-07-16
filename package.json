@@ -1,7 +1,7 @@
 {
-  "name": "pi-simple-subagents",
+  "name": "pi-subagent-workflows",
   "version": "0.1.0",
-  "description": "Lightweight synchronous subagents for Pi.",
+  "description": "Inline-defined subagents and programmatic workflow orchestration for Pi.",
   "type": "module",
   "keywords": [
     "pi-package"
@@ -62,5 +62,13 @@
   "exports": {
     ".": "./extension/index.ts",
     "./workflow": "./workflow/index.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JosiahEverson/pi-subagent-workflows.git"
+  },
+  "homepage": "https://github.com/JosiahEverson/pi-subagent-workflows#readme",
+  "bugs": {
+    "url": "https://github.com/JosiahEverson/pi-subagent-workflows/issues"
   }
 }

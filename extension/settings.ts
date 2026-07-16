@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "../shared/types.ts";
 
-export interface SimpleSubagentsSettings {
+export interface SubagentWorkflowsSettings {
   defaultModel?: string;
   defaultThinking?: ThinkingLevel;
   maxConcurrentSubagents?: number;
@@ -13,12 +13,12 @@ export interface SimpleSubagentsSettings {
   timeoutSummaryModel?: string;
 }
 
-export function loadSettings(): SimpleSubagentsSettings {
+export function loadSettings(): SubagentWorkflowsSettings {
   const path = join(getAgentDir(), "settings.json");
   if (!existsSync(path)) return {};
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-    const raw = parsed.simpleSubagents;
+    const raw = parsed.subagentWorkflows;
     return normalizeSettings(raw && typeof raw === "object" ? raw : {});
   } catch {
     return {};
@@ -31,7 +31,7 @@ export function positiveNumber(value: number | undefined, fallback: number): num
     : fallback;
 }
 
-function normalizeSettings(raw: object): SimpleSubagentsSettings {
+function normalizeSettings(raw: object): SubagentWorkflowsSettings {
   const settings = raw as Record<string, unknown>;
   return {
     defaultModel: stringOrUndefined(settings.defaultModel),

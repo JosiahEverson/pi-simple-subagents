@@ -46,7 +46,7 @@ export class Journal {
 
   constructor(config: JournalConfig = {}) {
     this.enabled = config.enabled ?? true;
-    this.dir = config.dir ?? join(process.cwd(), ".pi-simple-subagents", "journals");
+    this.dir = config.dir ?? join(process.cwd(), ".pi-subagent-workflows", "journals");
     this.path = join(this.dir, "journal.json");
   }
 

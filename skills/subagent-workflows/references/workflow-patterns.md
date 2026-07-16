@@ -14,7 +14,7 @@ Stay with direct `spawn_subagent` when you need to exercise judgment between ste
 ## Lifecycle
 
 1. Write the script to `/tmp/<name>.ts`.
-2. Import the library **by absolute path** from the package root (module resolution won't find it from `/tmp`). The package root is a path listed under `"packages"` in `~/.pi/agent/settings.json`, or `~/.pi/agent/npm/node_modules/pi-simple-subagents`.
+2. Import the library **by absolute path** from the package root (module resolution won't find it from `/tmp`). The package root is a path listed under `"packages"` in `~/.pi/agent/settings.json`, or `~/.pi/agent/npm/node_modules/pi-subagent-workflows`.
 3. Tell the user how many workers the script will spawn, then run:
    `npx tsx /tmp/<name>.ts`
    (`node --experimental-transform-types` also works, but only when the package root is outside `node_modules` — e.g. a local checkout; Node refuses to strip types under `node_modules`.)

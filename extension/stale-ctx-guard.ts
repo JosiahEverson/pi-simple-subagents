@@ -21,7 +21,7 @@ import { dirname, join } from "node:path";
  * surviving extension hot-reloads and session switches.
  */
 
-const GUARD_KEY = Symbol.for("pi-simple-subagents.stale-ctx-guard");
+const GUARD_KEY = Symbol.for("pi-subagent-workflows.stale-ctx-guard");
 const STALE_PREFIX = "This extension ctx is stale after session replacement or reload";
 
 interface GuardState {

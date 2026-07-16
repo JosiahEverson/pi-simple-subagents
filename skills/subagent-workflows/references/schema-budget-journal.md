@@ -38,7 +38,7 @@ Set in `createWorkflowRuntime({ budget })`; checked before each spawn (best-effo
 
 ## Journal and reruns
 
-Every completed `agent()` call is recorded in `<cwd>/.pi-simple-subagents/journals/`, keyed by a hash of the task text plus the fully resolved worker spec (role, model, thinking, tools, skills). On rerun, a call whose task and spec are unchanged returns the cached result without spawning.
+Every completed `agent()` call is recorded in `<cwd>/.pi-subagent-workflows/journals/`, keyed by a hash of the task text plus the fully resolved worker spec (role, model, thinking, tools, skills). On rerun, a call whose task and spec are unchanged returns the cached result without spawning.
 
 Consequences:
 
