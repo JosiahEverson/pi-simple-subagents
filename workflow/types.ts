@@ -34,6 +34,7 @@ export interface AgentResult<T = string> {
   output: T;
   usage: UsageSummary;
   agentId: string;
+  warnings?: string[];
 }
 
 export interface JournalConfig {

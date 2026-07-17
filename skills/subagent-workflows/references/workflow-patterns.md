@@ -31,7 +31,7 @@ const wf = await createWorkflowRuntime({
 });
 ```
 
-`wf.agent<T>(task, options?)` spawns one worker and resolves to `{ output, usage, agentId }`. Options are the same as `spawn_subagent` (`role`, `model`, `thinking`, `tools`, `skills`, `label`) plus `schema` for structured output. `wf.phase(name)` and `wf.log(msg)` print progress. Plain JavaScript handles everything else: loops, conditions, filtering, dedup, aggregation.
+`wf.agent<T>(task, options?)` spawns one worker and resolves to `{ output, usage, agentId, warnings? }`. Options are the same as `spawn_subagent` (`role`, `model`, `thinking`, `tools`, `skills`, `label`) plus `schema` for structured output. Global Pi extensions are inherited automatically except this package's own entry; extensions are not a per-worker option. `wf.phase(name)` and `wf.log(msg)` print progress. Plain JavaScript handles everything else: loops, conditions, filtering, dedup, aggregation.
 
 ## Patterns
 

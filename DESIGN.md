@@ -38,6 +38,7 @@ A single canonical intermediate representation — `RuntimeSubagentSpec` — dec
 - Model ID validation (scoped-model check)
 - Tool/skill filtering logic
 - System-prompt/harness-prompt construction
+- Self-extension filtering for Pi-native worker resource discovery
 
 **Not shared:**
 
@@ -75,6 +76,7 @@ A single canonical intermediate representation — `RuntimeSubagentSpec` — dec
 | `shared/tools.ts` | Tool/skill filtering logic (extracted from run.ts) |
 | `shared/models.ts` | Model ID validation, scoped-model utilities |
 | `shared/types.ts` | Shared type re-exports (`ThinkingLevel`, `SelectionSpec`, etc.) |
+| `shared/worker-extensions.ts` | Preserve normal global extension discovery while filtering only this package's extension entry |
 | `workflow/index.ts` | Public API: `agent()`, `parallel()`, `pipeline()`, `phase()`, `log()`, `createWorkflowRuntime()` |
 | `workflow/budget.ts` | Budget accounting and enforcement |
 | `workflow/journal.ts` | Run journal: persistence, keying, cache lookup, invalidation |
@@ -104,7 +106,7 @@ export type ThinkingLevel =
   | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 /**
- * "all" means every available tool/skill (minus self-tools).
+ * "all" means every available tool/skill after worker extensions are bound.
  * string[] is an explicit allowlist of names.
  */
 export type SelectionSpec = "all" | string[];
@@ -125,7 +127,7 @@ export interface RuntimeSubagentSpec {
    */
   systemPrompt: string;
 
-  /** Tool selection. "all" minus self-tools, or explicit allowlist. */
+  /** Tool selection after normal worker extensions bind. "all" or an explicit allowlist. */
   tools: SelectionSpec;
 
   /** Skill selection. "all" or explicit allowlist. */
@@ -214,7 +216,7 @@ function sanitizeLabel(raw: string): string {
 
 **Tools/skills:**
 
-- If `input.tools` is undefined → `"all"` (all available minus self-tools)
+- If `input.tools` is undefined → `"all"` (all tools available after normal worker extensions bind)
 - If `input.tools` is `[]` → no tools (model only)
 - If `input.tools` is `["read", "bash"]` → explicit allowlist
 - Same logic for skills
@@ -462,6 +464,9 @@ export interface AgentResult<T = string> {
 
   /** Agent ID for debugging. */
   agentId: string;
+
+  /** Resource-selection and extension diagnostics, when present. */
+  warnings?: string[];
 }
 ```
 
@@ -482,15 +487,16 @@ Behavior:
 2. Check `budget.maxTotalAgents` — throw `BudgetExceededError` if reached.
 3. Check journal cache — if hit and input+spec unchanged, return cached result.
 4. Call `resolveSpec()` (shared with extension).
-5. Create an in-memory `AgentSession` via Pi SDK `createAgentSession()`.
-6. Prompt with `buildHarnessPrompt(task, false)`.
-7. Extract final assistant text.
-8. If `options.schema` provided, validate output against JSON Schema:
+5. Discover normal global Pi extensions, filtering only this package's extension entry.
+6. Create an in-memory `AgentSession` via Pi SDK `createAgentSession()` with `projectTrusted: false`.
+7. Bind extensions in `print` mode, then select active tools and prompt with `buildHarnessPrompt(task, false)`.
+8. Extract final assistant text.
+9. If `options.schema` provided, validate output against JSON Schema:
    - On validation failure, retry up to `budget.maxRetriesPerItem` times with a correction prompt.
    - On exhausted retries, throw `SchemaValidationError`.
-9. Record result in journal.
-10. Release semaphore.
-11. Return `AgentResult`.
+10. Record result in journal.
+11. Emit `session_shutdown`, dispose, and release the semaphore.
+12. Return `AgentResult`.
 
 ### 4.5 `parallel(thunks)`
 
@@ -736,8 +742,7 @@ All workflow errors include `agentId` (if available), `task` (truncated), and `u
 |:---:|--------|
 | 1 | Spawn arg `tools` (explicit array or omitted=all) |
 
-Self-tool exclusion is **always** applied regardless of selection.
-Unknown tool names: warn (via `details.warnings`), omit from active set. Do not fail.
+Copies of this package's own extension are identified by their nearest package manifest and excluded before extension binding. Every other global extension is inherited normally. Tool selection has no source-blind self-name blacklist: if another extension supplies an effective tool named `spawn_subagent`, `message_subagent`, or `get_scoped_models`, ordinary `tools` selection applies. Unknown tool names warn (via `details.warnings` or workflow `result.warnings`), are omitted from the active set, and do not fail the run.
 
 ### Skills
 
@@ -751,7 +756,7 @@ Unknown skill names: warn, omit. Do not fail.
 
 ## 8. Invariants
 
-1. **No recursive spawning.** Self-tools (`spawn_subagent`, `message_subagent`, `get_scoped_models`) are always excluded from subagent tool surfaces.
+1. **Pi-native extension inheritance without recursion.** Workers discover and bind every normal global extension except this package's own extension entry. No extensions option is exposed per child; only tool and skill resources are selectable.
 2. **Model must be exact scoped-model ID.** Unqualified names, patterns, and aliases are rejected with `MODEL_NOT_SCOPED`.
 3. **Unknown tools/skills warn, never fail.** The spawn proceeds with the valid subset.
 4. **Every subagent is fresh-context.** No fork machinery exists.
@@ -975,9 +980,9 @@ Node 22.19+ supports `--test` with TypeScript (via `--experimental-strip-types` 
 
 The full spec is persisted so the session file is the only contention point. Pi's `SessionManager.open()` behavior under concurrent writes is the remaining risk. Recommendation: document that parallel messages to the same ID are unsupported (undefined behavior). If needed later, add a per-ID mutex in the registry.
 
-### Extension self-exclusion in workflow library
+### Extension inheritance in worker sessions
 
-Workflow scripts run in a child process and create sessions via the SDK directly. They do not load Pi extensions at all (using `DefaultResourceLoader` without additional extension paths, or a minimal resource loader). The self-tool exclusion is handled by the workflow library simply never registering subagent tools on worker sessions.
+Direct and workflow workers use `SettingsManager` and `DefaultResourceLoader` with `projectTrusted: false`, so normal global extensions are inherited automatically. Both paths share one filter that identifies copies of `pi-subagent-workflows` by their nearest package manifest name, with canonical-path fallback, and excludes only that package before binding in `print` mode. Active tools are selected only after extension binding; tools with the same names from unrelated extensions remain eligible. Extension failures are reported as warnings, and `session_shutdown` is emitted before disposal. Workflow success completes shutdown and disposal before journal persistence so cached warnings match the returned result.
 
 ### Workflow script execution environment
 

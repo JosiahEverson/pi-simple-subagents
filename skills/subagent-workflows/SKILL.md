@@ -26,6 +26,8 @@ Every subagent is defined inline at spawn time — there are no prebuilt agent t
 
 Output is plain text: a `subagent_id: <id>` header line, then the worker's reply. Ask workers to write large artifacts to files and reply with a short summary plus paths.
 
+Workers automatically inherit normal global Pi extensions; copies of this package's own extension are excluded to prevent recursion. Effective same-named tools from unrelated extensions remain selectable. There is no child extension selector. Use only `tools` and `skills` when narrowing child resources.
+
 Read [references/spawn-spec.md](references/spawn-spec.md) before writing non-trivial task specs.
 
 ## Workflow scripts
@@ -38,7 +40,7 @@ const results = await wf.pipeline(items, (item) => reviewOne(wf, item));
 console.log(summarize(results));
 ```
 
-Run with `npx tsx <script>`. Before running, state how many workers the script will spawn — the bash approval is the human gate.
+Run with `npx tsx <script>`. Before running, state how many workers the script will spawn. The launch and every Pi-native worker session follow the user's normal global extension and tool policies.
 
 Read as needed:
 

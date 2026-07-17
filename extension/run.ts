@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -11,7 +11,6 @@ import {
   type AgentToolUpdateCallback,
   type ExtensionAPI,
   type ExtensionContext,
-  type LoadExtensionsResult,
 } from "@earendil-works/pi-coding-agent";
 import {
   completeSimple,
@@ -35,11 +34,12 @@ import {
 } from "../shared/spec.ts";
 import { filterSkillSelection, filterToolSelection } from "../shared/tools.ts";
 import type { ThinkingLevel } from "../shared/types.ts";
+import { filterWorkerExtensions } from "../shared/worker-extensions.ts";
+import { configureWorkerSession } from "../shared/worker-session.ts";
 import type { RegistryRecord, SubagentRegistry } from "./registry.ts";
 import { Semaphore } from "./semaphore.ts";
 import { loadSettings, positiveNumber, type SubagentWorkflowsSettings } from "./settings.ts";
 
-const SUBAGENT_EXTENSION_EXCLUDE_PATH_PARTS = ["/pi-session-naming/"] as const;
 const DEFAULT_SOFT_TIMEOUT_MINUTES = 30;
 const DEFAULT_HARD_TIMEOUT_MINUTES = 45;
 const DEFAULT_MAX_CONCURRENT_SUBAGENTS = 4;
@@ -89,12 +89,11 @@ export async function executeSpawnSubagent(
   signal: AbortSignal | undefined,
   onUpdate: AgentToolUpdateCallback<SubagentToolDetails> | undefined,
   ctx: ExtensionContext,
-  selfExtensionPath: string,
 ): Promise<AgentToolResult<SubagentToolDetails>> {
   let id: string | undefined;
   try {
     return await executeSpawnSubagentUnchecked(
-      pi, registry, params, signal, onUpdate, ctx, selfExtensionPath,
+      pi, registry, params, signal, onUpdate, ctx,
       (createdId) => { id = createdId; },
     );
   } catch (error) {
@@ -114,7 +113,6 @@ async function executeSpawnSubagentUnchecked(
   signal: AbortSignal | undefined,
   onUpdate: AgentToolUpdateCallback<SubagentToolDetails> | undefined,
   ctx: ExtensionContext,
-  selfExtensionPath: string,
   onId: (id: string) => void,
 ): Promise<AgentToolResult<SubagentToolDetails>> {
   const settings = loadSettings();
@@ -169,7 +167,6 @@ async function executeSpawnSubagentUnchecked(
       signal,
       onUpdate,
       ctx,
-      selfExtensionPath,
       diagnostics: scopeWarnings,
     });
   } finally {
@@ -183,11 +180,10 @@ export async function executeMessageSubagent(
   signal: AbortSignal | undefined,
   onUpdate: AgentToolUpdateCallback<SubagentToolDetails> | undefined,
   ctx: ExtensionContext,
-  selfExtensionPath: string,
 ): Promise<AgentToolResult<SubagentToolDetails>> {
   try {
     return await executeMessageSubagentUnchecked(
-      registry, params, signal, onUpdate, ctx, selfExtensionPath,
+      registry, params, signal, onUpdate, ctx,
     );
   } catch (error) {
     return executionErrorResult(
@@ -205,7 +201,6 @@ async function executeMessageSubagentUnchecked(
   signal: AbortSignal | undefined,
   onUpdate: AgentToolUpdateCallback<SubagentToolDetails> | undefined,
   ctx: ExtensionContext,
-  selfExtensionPath: string,
 ): Promise<AgentToolResult<SubagentToolDetails>> {
   const record = registry.get(params.subagent_id);
   if (!record) {
@@ -239,7 +234,6 @@ async function executeMessageSubagentUnchecked(
       signal,
       onUpdate,
       ctx,
-      selfExtensionPath,
       diagnostics: [],
     });
   } finally {
@@ -265,7 +259,6 @@ async function runPrompt(options: {
   signal: AbortSignal | undefined;
   onUpdate: AgentToolUpdateCallback<SubagentToolDetails> | undefined;
   ctx: ExtensionContext;
-  selfExtensionPath: string;
   diagnostics: string[];
 }): Promise<AgentToolResult<SubagentToolDetails>> {
   const start = Date.now();
@@ -276,11 +269,10 @@ async function runPrompt(options: {
   let latestTool: string | undefined;
   let activeSession: {
     abort(): Promise<void>;
-    dispose(): void;
     messages: unknown[];
     sessionFile: string | undefined;
-    extensionRunner: { emit(event: { type: "session_shutdown"; reason: "quit" }): Promise<unknown> };
   } | undefined;
+  let activeCleanup: (() => Promise<void>) | undefined;
 
   const abort = () => {
     abortedByUser = true;
@@ -329,16 +321,16 @@ async function runPrompt(options: {
   let hardTimer: ReturnType<typeof setTimeout> | undefined;
   try {
     if (!model) throw new Error(`Model "${options.spec.modelId}" was not found.`);
-    const { session } = await createConfiguredSession({
+    const { session, cleanup } = await createConfiguredSession({
       spec: options.spec,
       model,
       sessionManager: options.sessionManager,
       sessionStartReason: options.sessionStartReason,
       ctx: options.ctx,
-      selfExtensionPath: options.selfExtensionPath,
       warnings,
     });
     activeSession = session;
+    activeCleanup = cleanup;
     baselineUsage = summarizeUsage(session.messages);
     if (abortedByUser || options.signal?.aborted || options.ctx.signal?.aborted) {
       await session.abort().catch(() => undefined);
@@ -413,14 +405,7 @@ async function runPrompt(options: {
     if (hardTimer) clearTimeout(hardTimer);
     if (progressTimer) clearInterval(progressTimer);
     for (const cleanup of cleanups) cleanup();
-    if (activeSession) {
-      try {
-        await activeSession.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
-      } catch {
-        // Best effort: dispose regardless.
-      }
-      activeSession.dispose();
-    }
+    await activeCleanup?.();
   }
 }
 
@@ -430,18 +415,16 @@ async function createConfiguredSession(options: {
   sessionManager: SessionManager;
   sessionStartReason: "startup" | "resume";
   ctx: ExtensionContext;
-  selfExtensionPath: string;
   warnings: string[];
 }) {
   const agentDir = getAgentDir();
   const settingsManager = SettingsManager.create(options.ctx.cwd, agentDir, { projectTrusted: false });
-  const selfPath = normalizeExtensionPath(options.selfExtensionPath);
   const resourceLoader = new DefaultResourceLoader({
     cwd: options.ctx.cwd,
     agentDir,
     settingsManager,
     systemPromptOverride: () => options.spec.systemPrompt,
-    extensionsOverride: (base) => filterSubagentExtensions(base, selfPath),
+    extensionsOverride: filterWorkerExtensions,
     skillsOverride: (base) => {
       const filtered = filterSkillSelection(base.skills.map((skill) => skill.name), options.spec.skills);
       options.warnings.push(...filtered.warnings);
@@ -450,6 +433,9 @@ async function createConfiguredSession(options: {
     },
   });
   await resourceLoader.reload();
+  options.warnings.push(...resourceLoader.getExtensions().errors.map(
+    (error) => `Extension failed to load (${error.path}): ${error.error}`,
+  ));
 
   const created = await createAgentSession({
     cwd: options.ctx.cwd,
@@ -461,35 +447,22 @@ async function createConfiguredSession(options: {
     sessionManager: options.sessionManager,
     sessionStartEvent: { type: "session_start", reason: options.sessionStartReason },
   });
-  await created.session.bindExtensions({
-    mode: "print",
-    onError: (error) => options.warnings.push(
-      `Extension error (${error.extensionPath}, ${error.event}): ${error.error}`,
-    ),
+  const cleanup = await configureWorkerSession(created.session, options.warnings, async (session) => {
+    await session.bindExtensions({
+      mode: "print",
+      onError: (error) => options.warnings.push(
+        `Extension error (${error.extensionPath}, ${error.event}): ${error.error}`,
+      ),
+    });
+
+    const toolSelection = filterToolSelection(
+      session.getAllTools().map((tool) => tool.name),
+      options.spec.tools,
+    );
+    options.warnings.push(...toolSelection.warnings);
+    session.setActiveToolsByName(toolSelection.selected);
   });
-
-  const toolSelection = filterToolSelection(
-    created.session.getAllTools().map((tool) => tool.name),
-    options.spec.tools,
-  );
-  options.warnings.push(...toolSelection.warnings);
-  created.session.setActiveToolsByName(toolSelection.selected);
-  return created;
-}
-
-function filterSubagentExtensions(base: LoadExtensionsResult, selfPath: string): LoadExtensionsResult {
-  return {
-    ...base,
-    extensions: base.extensions.filter((extension) => {
-      const extensionPath = normalizeExtensionPath(extension.resolvedPath);
-      return extensionPath !== selfPath &&
-        !SUBAGENT_EXTENSION_EXCLUDE_PATH_PARTS.some((part) => extensionPath.includes(part));
-    }),
-  };
-}
-
-function normalizeExtensionPath(path: string): string {
-  return resolve(path).replaceAll("\\", "/");
+  return { ...created, cleanup };
 }
 
 async function getScopedModelOptions(ctx: ExtensionContext): Promise<{

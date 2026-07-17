@@ -1,4 +1,3 @@
-import { fileURLToPath } from "node:url";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
@@ -21,7 +20,6 @@ import {
 import { loadSettings } from "./settings.ts";
 import { installStaleCtxGuard } from "./stale-ctx-guard.ts";
 
-const SELF_EXTENSION_PATH = fileURLToPath(import.meta.url);
 const COLLAPSED_RESPONSE_LINES = 16;
 
 interface SpawnDisplayConfig {
@@ -218,7 +216,6 @@ export default function subagentWorkflows(pi: ExtensionAPI) {
       signal,
       onUpdate,
       ctx,
-      SELF_EXTENSION_PATH,
     ),
     renderCall: (args, theme) => renderSubagentCall(
       "spawn",
@@ -246,7 +243,6 @@ export default function subagentWorkflows(pi: ExtensionAPI) {
       signal,
       onUpdate,
       ctx,
-      SELF_EXTENSION_PATH,
     ),
     renderCall: (args, theme) => renderSubagentCall("message", args.subagent_id, args.prompt, theme),
     renderResult: (result, options, theme) => renderSubagentResult(result, options, theme),

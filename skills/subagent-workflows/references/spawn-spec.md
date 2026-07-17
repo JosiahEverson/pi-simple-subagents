@@ -35,13 +35,13 @@ Routing is your decision — make it deliberately per task:
 
 ## Narrowing tools and skills
 
-Omit for full access. Narrow when it sharpens behavior or reduces risk:
+Omit `tools` or `skills` to select all available resources of that kind. Narrow them when it sharpens behavior or reduces risk:
 
 - Read-only analysis: `tools: ["read", "bash", "grep"]`.
 - Pure reasoning over provided text: `tools: []`.
 - Skills: pass an allowlist when only specific skills are relevant; irrelevant skills are noise in the worker's context.
 
-Unknown names warn and are dropped — the spawn still proceeds.
+Unknown names warn and are dropped — the spawn still proceeds. Normal global extensions are inherited automatically; copies of this package's own extension are excluded to prevent recursion. Tool selection uses the remaining effective names, including same-named tools from unrelated extensions. Extensions are not selectable per child.
 
 ## Follow-ups
 

@@ -9,6 +9,8 @@ import { emptyUsage, getFinalAssistantText, summarizeUsage } from "../shared/mes
 import { findRuntimeModelById, resolveScopedModels } from "../shared/models.ts";
 import { buildHarnessPrompt, resolveSpec } from "../shared/spec.ts";
 import { filterSkillSelection, filterToolSelection } from "../shared/tools.ts";
+import { filterWorkerExtensions } from "../shared/worker-extensions.ts";
+import { configureWorkerSession } from "../shared/worker-session.ts";
 import {
   AgentFailedError,
   type BudgetTracker,
@@ -62,6 +64,8 @@ async function runAgent<T>(
   const startedAt = Date.now();
   let agentId: string | undefined;
   let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
+  let cleanupSession: (() => Promise<void>) | undefined;
+  const warnings: string[] = [];
   let usage = emptyUsage();
   let usageRecorded = false;
   let runtimeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -99,13 +103,12 @@ async function runAgent<T>(
     scheduleRuntimeAbort();
     const model = findRuntimeModelById(spec.modelId, context.modelRuntime);
     if (!model) throw new Error(`Model "${spec.modelId}" was not found.`);
-    const warnings: string[] = [];
     const resourceLoader = new DefaultResourceLoader({
       cwd: context.cwd,
       agentDir: getAgentDir(),
       settingsManager: context.settingsManager,
       systemPromptOverride: () => spec.systemPrompt,
-      noExtensions: true,
+      extensionsOverride: filterWorkerExtensions,
       skillsOverride: (base) => {
         const filtered = filterSkillSelection(base.skills.map((skill) => skill.name), spec.skills);
         warnings.push(...filtered.warnings);
@@ -114,6 +117,9 @@ async function runAgent<T>(
       },
     });
     await resourceLoader.reload();
+    warnings.push(...resourceLoader.getExtensions().errors.map(
+      (error) => `Extension failed to load (${error.path}): ${error.error}`,
+    ));
     if (runtimeAborted) throw context.budgetTracker.runtimeAbortError();
     const created = await createAgentSession({
       cwd: context.cwd,
@@ -125,13 +131,21 @@ async function runAgent<T>(
       sessionManager: SessionManager.inMemory(context.cwd),
     });
     session = created.session;
+    cleanupSession = await configureWorkerSession(session, warnings, async (worker) => {
+      await worker.bindExtensions({
+        mode: "print",
+        onError: (error) => warnings.push(
+          `Extension error (${error.extensionPath}, ${error.event}): ${error.error}`,
+        ),
+      });
+      const toolSelection = filterToolSelection(worker.getAllTools().map((tool) => tool.name), spec.tools);
+      warnings.push(...toolSelection.warnings);
+      worker.setActiveToolsByName(toolSelection.selected);
+    });
     if (runtimeAborted) {
       await session.abort();
       throw context.budgetTracker.runtimeAbortError();
     }
-    const toolSelection = filterToolSelection(session.getAllTools().map((tool) => tool.name), spec.tools);
-    warnings.push(...toolSelection.warnings);
-    session.setActiveToolsByName(toolSelection.selected);
 
     const initialPrompt = options.schema
       ? appendSchemaInstruction(buildHarnessPrompt(task, false), options.schema)
@@ -166,9 +180,11 @@ async function runAgent<T>(
     }
     usage = summarizeUsage(session.messages);
     recordUsage();
-    const result: AgentResult<T> = { output: output as T, usage, agentId };
-    await context.journal.record(key, input, result as AgentResult<unknown>);
+    await cleanupSession();
+    stopRuntimeTimer();
     if (runtimeAborted) throw context.budgetTracker.runtimeAbortError();
+    const result: AgentResult<T> = { output: output as T, usage, agentId, warnings };
+    await context.journal.record(key, input, result as AgentResult<unknown>);
     agentCompleted(agentId, Date.now() - startedAt, usage);
     return result;
   } catch (error) {
@@ -203,8 +219,8 @@ async function runAgent<T>(
       { cause: error },
     );
   } finally {
-    if (runtimeTimer) clearTimeout(runtimeTimer);
-    session?.dispose();
+    stopRuntimeTimer();
+    await cleanupSession?.();
     release();
   }
 
@@ -220,6 +236,12 @@ async function runAgent<T>(
       runtimeAborted = true;
       void session?.abort().catch(() => undefined);
     }, Math.min(remaining, 2_147_483_647));
+  }
+
+  function stopRuntimeTimer(): void {
+    if (!runtimeTimer) return;
+    clearTimeout(runtimeTimer);
+    runtimeTimer = undefined;
   }
 
   function recordUsage(): void {

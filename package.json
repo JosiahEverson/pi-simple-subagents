@@ -1,6 +1,6 @@
 {
   "name": "pi-subagent-workflows",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Inline-defined subagents and programmatic workflow orchestration for Pi.",
   "type": "module",
   "keywords": [
@@ -18,7 +18,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "unittest": "node --experimental-transform-types --test test/*.test.ts",
-    "test": "npm run typecheck && npm run unittest"
+    "test": "npm run typecheck && npm run unittest",
+    "prepublishOnly": "npm test"
   },
   "files": [
     "extension/",

@@ -27,7 +27,9 @@ Runs a fresh-context subagent synchronously and returns its final reply.
 | `tools` / `skills` | optional | Allowlists; omit for all, `[]` for none |
 | `label` | optional | Short display name |
 
-Output is plain text: a `subagent_id: <id>` header line followed by the worker's reply. The extension's own tools are always excluded from workers — no recursive spawning.
+Output is plain text: a `subagent_id: <id>` header line followed by the worker's reply.
+
+Workers are normal Pi `AgentSession`s. They automatically discover and bind all global extensions in `print` mode, except copies of this package's own extension, which are identified by package manifest and excluded to prevent recursion. No third-party extension is singled out. Tool selection then operates on Pi's effective tool surface, so same-named tools supplied by another extension remain available. Child resource selection is limited to `tools` and `skills`; there is no per-child extensions option.
 
 ### `message_subagent`
 
@@ -52,11 +54,13 @@ const audits = await wf.pipeline(files, async (file) => ({
 console.log(audits.filter((a) => a.finding !== "NONE"));
 ```
 
-- `agent(task, options)` — one fresh worker; options match `spawn_subagent`, plus `schema` for JSON-Schema-validated structured output with correction retries.
+- `agent(task, options)` — one fresh Pi-native worker; options match `spawn_subagent`, plus `schema` for JSON-Schema-validated structured output with correction retries. Results may include `warnings` from resource selection or extensions.
 - `parallel(thunks)` — barrier concurrency.
 - `pipeline(items, ...stages)` — streaming stages, no barrier.
 - Budgets — `maxConcurrentAgents`, `maxTotalAgents`, `maxRuntime`, `maxRetriesPerItem`, `maxTotalTokens`, `maxTotalCost`.
 - Journal — completed calls are cached on disk keyed by task + spec; unchanged calls are served from cache on rerun.
+
+Workflow workers use the same global extension discovery as direct workers and bind extensions before active tools are selected. Successful runs emit Pi's shutdown event and dispose before their final warnings are journaled and returned. Both paths keep `projectTrusted: false`. This package is the only extension package filtered from workers.
 
 The packaged `subagent-workflows` skill teaches the orchestrating model both surfaces.
 
